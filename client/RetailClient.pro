@@ -82,7 +82,6 @@ SOURCES += \
     core/face_antispoof.c \
     core/h264_parser.c \
     core/mp4_recorder.c \
-    core/av_recorder.c \
     ../common/logger.c \
     core/watchdog.c \
     core/hw_watchdog.c \
@@ -128,7 +127,6 @@ HEADERS += \
     core/face_antispoof.h \
     core/h264_parser.h \
     core/mp4_recorder.h \
-    core/av_recorder.h \
     ../common/logger.h \
     core/watchdog.h \
     core/hw_watchdog.h \
@@ -151,7 +149,7 @@ FORMS += \
 # Base libraries
 LIBS += -lpthread -lsqlite3 -lssl -lcrypto -lcurl -ldl -lm
 
-# OpenCV (face detection uses cv::Mat)
+# OpenCV (image utilities; face pipeline runs on RKNN NPU)
 LIBS += $$system(pkg-config --libs opencv4)
 
 # FFmpeg (video encoding / RTSP streaming / local recording)

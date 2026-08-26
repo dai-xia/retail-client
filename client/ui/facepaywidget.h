@@ -35,7 +35,7 @@ private:
     bool m_wasMonitoring;  // Whether monitor streaming was active on open (restored in destructor)
     QTimer* m_cameraTimer;
 
-    void processFaceVerification(const cv::Mat& frame);
+    void processFaceVerification(const QImage& frame);
 };
 
 #endif // FACEPAYWIDGET_H

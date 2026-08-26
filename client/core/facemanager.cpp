@@ -69,6 +69,14 @@ static float computeIoU(int ax, int ay, int aw, int ah,
 }
 
 
+/* Convert a BGR888 buffer (as produced by RGA) to an RGB QImage. */
+static QImage bgrToQImage(const uint8_t *bgr, int w, int h)
+{
+    QImage image(bgr, w, h, w * 3, QImage::Format_RGB888);
+    return image.rgbSwapped().copy();
+}
+
+
 
 FaceManager* FaceManager::getInstance()
 {
@@ -351,9 +359,9 @@ bool FaceManager::initCamera(int cameraIndex)
     return true;
 }
 
-cv::Mat FaceManager::getCameraFrame()
+QImage FaceManager::getCameraFrame()
 {
-    cv::Mat frame;
+    QImage frame;
     if (!m_isCameraOpened || !m_v4l2Ctx) return frame;
 
     void  *frameBuf = nullptr;
@@ -368,22 +376,22 @@ cv::Mat FaceManager::getCameraFrame()
         src.height   = m_v4l2Height;
         src.format   = (m_v4l2PixFmt == V4L2_PIX_FMT_YUYV) ? RGA_FMT_YUYV : RGA_FMT_NV12;
 
-        cv::Mat tmpBgr(m_v4l2Height, m_v4l2Width, CV_8UC3);
+        QByteArray bgrBuf(m_v4l2Width * m_v4l2Height * 3, 0);
 
         rga_image_t dst = {};
-        dst.vir_addr = tmpBgr.data;
+        dst.vir_addr = bgrBuf.data();
         dst.width    = m_v4l2Width;
         dst.height   = m_v4l2Height;
         dst.format   = RGA_FMT_BGR888;
 
-        if (rga_transform_process(&src, &dst, nullptr) == 0)
-            frame = tmpBgr.clone();
+        if (rga_transform_process(&src, &dst, nullptr) == 0) {
+            if (m_isRecording && m_recorder)
+                mp4_recorder_write_bgr(m_recorder, (const uint8_t*)bgrBuf.data(), bgrBuf.size());
+            frame = bgrToQImage((const uint8_t*)bgrBuf.constData(), m_v4l2Width, m_v4l2Height);
+        }
     }
 
     v4l2_capture_enqueue(m_v4l2Ctx);
-
-    if (m_isRecording && m_recorder && !frame.empty())
-        mp4_recorder_write_bgr(m_recorder, frame.data, frame.total() * frame.elemSize());
 
     return frame;
 }
@@ -435,22 +443,19 @@ void FaceManager::generateUltraFacePriors()
 }
 
 
-std::vector<cv::Rect> FaceManager::detectFace(const cv::Mat& frame)
+std::vector<FaceRect> FaceManager::detectFace(const QImage& frame)
 {
-    std::vector<cv::Rect> faces;
-    if (frame.empty() || !m_detectRknnCtx) return faces;
+    std::vector<FaceRect> faces;
+    if (frame.isNull() || !m_detectRknnCtx) return faces;
 
-    cv::Mat rgb, resized;
-    if (frame.channels() == 3)
-        cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
-    else
-        rgb = frame.clone();
-    cv::resize(rgb, resized, cv::Size(DETECT_INPUT_W, DETECT_INPUT_H));
+    QImage rgb = frame.convertToFormat(QImage::Format_RGB888);
+    QImage resized = rgb.scaled(DETECT_INPUT_W, DETECT_INPUT_H,
+                                Qt::IgnoreAspectRatio, Qt::FastTransformation);
 
     rknn_input inputs[1];
     memset(&inputs[0], 0, sizeof(rknn_input));
     inputs[0].index = 0;
-    inputs[0].buf   = resized.data;
+    inputs[0].buf   = resized.bits();
     inputs[0].size  = DETECT_INPUT_W * DETECT_INPUT_H * 3;
     inputs[0].type  = RKNN_TENSOR_UINT8;
     inputs[0].fmt   = RKNN_TENSOR_NHWC;
@@ -464,16 +469,16 @@ std::vector<cv::Rect> FaceManager::detectFace(const cv::Mat& frame)
     outputs[1].want_float = 1; outputs[1].is_prealloc = 0;
     if (rknn_outputs_get(m_detectRknnCtx, 2, outputs, NULL) < 0) return faces;
 
-    faces = decodeUltraFaceOutputs(outputs, frame.cols, frame.rows);
+    faces = decodeUltraFaceOutputs(outputs, frame.width(), frame.height());
 
     rknn_outputs_release(m_detectRknnCtx, 2, outputs);
     return faces;
 }
 
 
-std::vector<cv::Rect> FaceManager::detectFaceFd(int src_fd)
+std::vector<FaceRect> FaceManager::detectFaceFd(int src_fd)
 {
-    std::vector<cv::Rect> faces;
+    std::vector<FaceRect> faces;
     if (src_fd < 0 || !m_detectRknnCtx || m_rknnInputFd < 0 || !m_rgaAvailable)
         return faces;
 
@@ -519,9 +524,9 @@ std::vector<cv::Rect> FaceManager::detectFaceFd(int src_fd)
 }
 
 
-std::vector<cv::Rect> FaceManager::decodeUltraFaceOutputs(rknn_output outputs[2], int img_w, int img_h)
+std::vector<FaceRect> FaceManager::decodeUltraFaceOutputs(rknn_output outputs[2], int img_w, int img_h)
 {
-    std::vector<cv::Rect> faces;
+    std::vector<FaceRect> faces;
 
     float *scores = (float*)outputs[0].buf;
     float *boxes  = (float*)outputs[1].buf;
@@ -569,10 +574,10 @@ std::vector<cv::Rect> FaceManager::decodeUltraFaceOutputs(rknn_output outputs[2]
     std::vector<bool> suppressed(candidates.size(), false);
     for (size_t i = 0; i < candidates.size(); i++) {
         if (suppressed[i]) continue;
-        faces.push_back(cv::Rect(
+        faces.push_back(FaceRect{
             (int)candidates[i].x1, (int)candidates[i].y1,
             (int)(candidates[i].x2 - candidates[i].x1),
-            (int)(candidates[i].y2 - candidates[i].y1)));
+            (int)(candidates[i].y2 - candidates[i].y1)});
         for (size_t j = i + 1; j < candidates.size(); j++) {
             if (suppressed[j]) continue;
             float ix1 = std::max(candidates[i].x1, candidates[j].x1);
@@ -633,16 +638,19 @@ QVector<float> FaceManager::extractFeatureRknnFd()
 }
 
 
-QVector<float> FaceManager::extractFeatureVector(const cv::Mat& faceImage)
+QVector<float> FaceManager::extractFeatureVector(const QImage& frame, const FaceRect& roi)
 {
-    if (!m_rknnCtx || m_featureInputFd < 0 || faceImage.empty() || !m_rgaAvailable)
+    if (!m_rknnCtx || m_featureInputFd < 0 || frame.isNull() || !m_rgaAvailable)
         return QVector<float>();
 
+    QImage faceCrop = frame.copy(roi.x, roi.y, roi.width, roi.height)
+                          .convertToFormat(QImage::Format_RGB888);
+
     rga_image_t src = {};
-    src.vir_addr = faceImage.data;
-    src.width    = faceImage.cols;
-    src.height   = faceImage.rows;
-    src.format   = RGA_FMT_BGR888;
+    src.vir_addr = faceCrop.bits();
+    src.width    = faceCrop.width();
+    src.height   = faceCrop.height();
+    src.format   = RGA_FMT_RGB888;
 
     rga_image_t dst = {};
     dst.fd       = m_featureInputFd;
@@ -651,34 +659,7 @@ QVector<float> FaceManager::extractFeatureVector(const cv::Mat& faceImage)
     dst.format   = RGA_FMT_RGB888;
 
     if (rga_transform_process(&src, &dst, nullptr) != 0) {
-        qWarning() << "[Feature] RGA 准备特征输入失败 (Mat)";
-        return QVector<float>();
-    }
-    return extractFeatureRknnFd();
-}
-
-
-QVector<float> FaceManager::extractFeatureVector(int src_fd, int src_w, int src_h,
-                                                  rga_pixel_format src_fmt,
-                                                  const int roi[4])
-{
-    if (!m_rknnCtx || m_featureInputFd < 0 || src_fd < 0 || !m_rgaAvailable)
-        return QVector<float>();
-
-    rga_image_t src = {};
-    src.fd     = src_fd;
-    src.width  = src_w;
-    src.height = src_h;
-    src.format = src_fmt;
-
-    rga_image_t dst = {};
-    dst.fd       = m_featureInputFd;
-    dst.width    = INPUT_SIZE;
-    dst.height   = INPUT_SIZE;
-    dst.format   = RGA_FMT_RGB888;
-
-    if (rga_transform_process(&src, &dst, roi) != 0) {
-        qWarning() << "[Feature] RGA 准备特征输入失败 (fd)";
+        qWarning() << "[Feature] RGA 准备特征输入失败";
         return QVector<float>();
     }
     return extractFeatureRknnFd();
@@ -686,14 +667,13 @@ QVector<float> FaceManager::extractFeatureVector(int src_fd, int src_w, int src_
 
 
 
-bool FaceManager::registerFace(const QString& uid, const cv::Mat& faceFrame)
+bool FaceManager::registerFace(const QString& uid, const QImage& faceFrame)
 {
-    std::vector<cv::Rect> faces = detectFace(faceFrame);
+    std::vector<FaceRect> faces = detectFace(faceFrame);
     if (faces.empty()) { qWarning() << "注册失败：未检测到人脸"; return false; }
 
-    cv::Rect mainFace = faces[0];
-    cv::Mat faceROI = faceFrame(mainFace).clone();
-    QVector<float> feature = extractFeatureVector(faceROI);
+    FaceRect mainFace = faces[0];
+    QVector<float> feature = extractFeatureVector(faceFrame, mainFace);
     if (feature.isEmpty()) { qWarning() << "注册失败：特征提取失败"; return false; }
 
     m_featureMap[uid] = feature;
@@ -702,20 +682,21 @@ bool FaceManager::registerFace(const QString& uid, const cv::Mat& faceFrame)
     return true;
 }
 
-QString FaceManager::extractFaceFeature(const cv::Mat& faceFrame)
+QString FaceManager::extractFaceFeature(const QImage& faceFrame)
 {
-    std::vector<cv::Rect> faces = detectFace(faceFrame);
+    std::vector<FaceRect> faces = detectFace(faceFrame);
     if (faces.empty()) return "";
 
-    cv::Rect mainFace = faces[0];
+    FaceRect mainFace = faces[0];
+    QImage rgbFrame = faceFrame.convertToFormat(QImage::Format_RGB888);
 
     
     if (m_antispoofCtx && m_enableAntispoof) {
         int roi[4] = { mainFace.x, mainFace.y,
                        mainFace.x + mainFace.width, mainFace.y + mainFace.height };
         face_liveness_result liveness = face_antispoof_check(m_antispoofCtx,
-                                                              faceFrame.data,
-                                                              faceFrame.cols, faceFrame.rows,
+                                                              rgbFrame.bits(),
+                                                              rgbFrame.width(), rgbFrame.height(),
                                                               roi);
         if (liveness == LIVENESS_SPOOF) {
             emit signalSpoofDetected(-1);
@@ -746,27 +727,30 @@ QString FaceManager::extractFaceFeature(const cv::Mat& faceFrame)
     }
 
     
-    cv::Mat alignedFace;
+    QImage alignedFace;
     if (m_landmarkCtx && m_enableLandmark) {
         int roi[4] = { mainFace.x, mainFace.y,
                        mainFace.x + mainFace.width, mainFace.y + mainFace.height };
         face_5point_t lm_points;
-        if (face_landmark_detect(m_landmarkCtx, faceFrame.data,
-                                  faceFrame.cols, faceFrame.rows,
+        if (face_landmark_detect(m_landmarkCtx, rgbFrame.bits(),
+                                  rgbFrame.width(), rgbFrame.height(),
                                   roi, &lm_points) == 0) {
             uint8_t aligned_buf[112 * 112 * 3];
-            if (face_landmark_align(m_landmarkCtx, faceFrame.data,
-                                     faceFrame.cols, faceFrame.rows,
+            if (face_landmark_align(m_landmarkCtx, rgbFrame.bits(),
+                                     rgbFrame.width(), rgbFrame.height(),
                                      &lm_points, aligned_buf) == 0) {
-                alignedFace = cv::Mat(112, 112, CV_8UC3, aligned_buf).clone();
+                alignedFace = QImage(aligned_buf, 112, 112, 112 * 3,
+                                     QImage::Format_RGB888).copy();
             }
         }
     }
-    if (alignedFace.empty())
-        alignedFace = faceFrame(mainFace).clone();
+    if (alignedFace.isNull())
+        alignedFace = faceFrame.copy(mainFace.x, mainFace.y, mainFace.width, mainFace.height)
+                          .convertToFormat(QImage::Format_RGB888);
 
     
-    QVector<float> feature = extractFeatureVector(alignedFace);
+    QVector<float> feature = extractFeatureVector(
+        alignedFace, FaceRect{0, 0, alignedFace.width(), alignedFace.height()});
     if (feature.isEmpty()) return "";
 
     
@@ -795,15 +779,14 @@ QString FaceManager::extractFaceFeature(const cv::Mat& faceFrame)
 
 QImage FaceManager::captureFace()
 {
-    cv::Mat frame = getCameraFrame();
-    if (frame.empty()) return QImage();
+    QImage frame = getCameraFrame();
+    if (frame.isNull()) return QImage();
 
-    std::vector<cv::Rect> faces = detectFace(frame);
+    std::vector<FaceRect> faces = detectFace(frame);
     if (faces.empty()) return QImage();
 
-    cv::Rect mainFace = faces[0];
-    cv::Mat faceROI = frame(mainFace).clone();
-    return matToQImage(faceROI);
+    FaceRect mainFace = faces[0];
+    return frame.copy(mainFace.x, mainFace.y, mainFace.width, mainFace.height);
 }
 
 void FaceManager::removeFaceData(const QString& uid)
@@ -811,30 +794,6 @@ void FaceManager::removeFaceData(const QString& uid)
     if (m_featureMap.contains(uid)) {
         m_featureMap.remove(uid);
         saveFeatureModel();
-    }
-}
-
-
-
-QImage FaceManager::matToQImage(const cv::Mat& mat)
-{
-    if (mat.empty()) return QImage();
-
-    switch (mat.type()) {
-    case CV_8UC1: {
-        QImage image(mat.data, mat.cols, mat.rows, (int)mat.step, QImage::Format_Grayscale8);
-        return image.copy();
-    }
-    case CV_8UC3: {
-        QImage image(mat.data, mat.cols, mat.rows, (int)mat.step, QImage::Format_RGB888);
-        return image.rgbSwapped().copy();
-    }
-    case CV_8UC4: {
-        QImage image(mat.data, mat.cols, mat.rows, (int)mat.step, QImage::Format_ARGB32);
-        return image.copy();
-    }
-    default:
-        return QImage();
     }
 }
 
@@ -1041,7 +1000,7 @@ void FaceManager::monitorThreadFunc()
 
                     if (m_osdFrameCounter >= m_osdDetectInterval) {
                         m_osdFrameCounter = 0;
-                        std::vector<cv::Rect> osdFaces = detectFaceFd(frame_fd);
+                        std::vector<FaceRect> osdFaces = detectFaceFd(frame_fd);
                         if (!osdFaces.empty()) {
                             static rga_osd_rect_t faceRects[16];
                             int n = (int)osdFaces.size() > 16 ? 16 : (int)osdFaces.size();

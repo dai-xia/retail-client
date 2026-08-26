@@ -199,19 +199,16 @@ void MemberRegister::processRegisterRequest()
             return;
         }
 
-        cv::Mat faceMat(m_currentFace.height(), m_currentFace.width(), CV_8UC4,
-                         const_cast<uchar*>(m_currentFace.bits()), m_currentFace.bytesPerLine());
-        cv::Mat faceMatBGR;
-        cv::cvtColor(faceMat, faceMatBGR, cv::COLOR_RGBA2BGR);
+        QImage faceRgb = m_currentFace.convertToFormat(QImage::Format_RGB888);
 
         // Extract feature vector; uploaded to server for cross-client face matching
-        faceFeature = m_faceManager->extractFaceFeature(faceMatBGR);
+        faceFeature = m_faceManager->extractFaceFeature(faceRgb);
         if(faceFeature.isEmpty())
         {
             qWarning() << "Face feature extraction failed; registration will have no face feature";
         }
 
-        m_faceManager->registerFace(uid, faceMatBGR);
+        m_faceManager->registerFace(uid, faceRgb);
     }
 
     ClientService::getInstance()->requestMemberRegister(uid, name, phone, password,

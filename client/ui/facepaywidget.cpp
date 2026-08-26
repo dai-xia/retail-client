@@ -5,6 +5,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QDebug>
+#include <QPainter>
 
 FacePayWidget::FacePayWidget(member_info_t member, QList<order_item_t> cart, QWidget *parent)
     : QDialog(parent)
@@ -87,24 +88,14 @@ FacePayWidget::~FacePayWidget()
 
 void FacePayWidget::slotUpdateCameraFrame()
 {
-    cv::Mat frame = m_faceManager->getCameraFrame();
-    if(frame.empty()) return;
+    QImage frame = m_faceManager->getCameraFrame();
+    if(frame.isNull()) return;
 
-    std::vector<cv::Rect> faces = m_faceManager->detectFace(frame);
-
+    std::vector<FaceRect> faces = m_faceManager->detectFace(frame);
     bool faceDetected = !faces.empty();
 
     if(faceDetected && !m_isProcessing && !m_faceVerified)
     {
-        for(size_t i = 0; i < faces.size(); i++)
-        {
-            cv::rectangle(frame, faces[i], cv::Scalar(0, 255, 0), 2);
-
-            cv::putText(frame, "Face Detected",
-                       cv::Point(faces[i].x, faces[i].y - 10),
-                       cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
-        }
-
         processFaceVerification(frame);
     }
     else if(!faceDetected)
@@ -113,13 +104,24 @@ void FacePayWidget::slotUpdateCameraFrame()
         ui->label_status->setStyleSheet("color: blue; font-size: 14px;");
     }
 
-    // Convert OpenCV Mat -> QImage, scale and display in the camera area
-    QImage img = m_faceManager->matToQImage(frame);
-    ui->label_camera->setPixmap(QPixmap::fromImage(img)
+    // Draw detection boxes and show in the camera area
+    QImage display = frame.convertToFormat(QImage::Format_RGB32);
+    if(faceDetected)
+    {
+        QPainter painter(&display);
+        painter.setPen(QPen(Qt::green, 2));
+        for(size_t i = 0; i < faces.size(); i++)
+        {
+            painter.drawRect(faces[i].x, faces[i].y, faces[i].width, faces[i].height);
+            painter.drawText(faces[i].x, faces[i].y > 10 ? faces[i].y - 10 : faces[i].y + faces[i].height + 15,
+                             "Face Detected");
+        }
+    }
+    ui->label_camera->setPixmap(QPixmap::fromImage(display)
                                 .scaled(ui->label_camera->size(), Qt::KeepAspectRatio));
 }
 
-void FacePayWidget::processFaceVerification(const cv::Mat& frame)
+void FacePayWidget::processFaceVerification(const QImage& frame)
 {
     if(m_isProcessing || m_faceVerified) return;
 
