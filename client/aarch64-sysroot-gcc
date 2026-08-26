@@ -1,0 +1,29 @@
+#!/bin/bash
+# Cross-compile C wrapper - uses the rootfs crt/libc instead of the
+# compiler's bundled (older) versions.
+#
+# Override SYSROOT via the SYSROOT environment variable:
+#   SYSROOT=/path/to/arm64/rootfs ./aarch64-sysroot-gcc ...
+
+SYSROOT="${SYSROOT:-$RK3568_SYSROOT}"
+if [ -z "$SYSROOT" ]; then
+    echo "Error: SYSROOT is not set. Export SYSROOT or RK3568_SYSROOT." >&2
+    exit 1
+fi
+CRTDIR="$SYSROOT/lib/aarch64-linux-gnu"
+LIBDIR="$SYSROOT/usr/lib/aarch64-linux-gnu"
+GCC_CRT="/usr/lib/gcc-cross/aarch64-linux-gnu/9"
+
+# Compile-only flags: delegate to the original compiler
+if echo "$@" | grep -qE ' -c | -S | -E '; then
+    exec aarch64-linux-gnu-gcc --sysroot=$SYSROOT "$@"
+fi
+
+# Link: use -nostdlib + rootfs crt/libc
+exec aarch64-linux-gnu-gcc --sysroot=$SYSROOT -nostdlib \
+    "$CRTDIR/crt1.o" "$CRTDIR/crti.o" "$GCC_CRT/crtbeginT.o" \
+    -L$LIBDIR -L$CRTDIR \
+    -Wl,-rpath-link,$LIBDIR -Wl,-rpath-link,$CRTDIR \
+    "$@" \
+    -lm -lpthread -lc -lgcc_s \
+    "$GCC_CRT/crtend.o" "$CRTDIR/crtn.o"

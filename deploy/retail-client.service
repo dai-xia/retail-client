@@ -1,0 +1,52 @@
+#
+# retail-client.service - systemd unit for the retail vending client
+#
+# Deploy to: /etc/systemd/system/retail-client.service
+# Enable:    systemctl enable retail-client
+# Start:     systemctl start retail-client
+# Logs:      journalctl -u retail-client -f
+#
+
+[Unit]
+Description=Retail Vending Machine Client
+Documentation=https://github.com/example/retail-system
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/retail/app
+ExecStartPre=/bin/sh -c 'test -e /dev/rc522_dev || modprobe rc522_drv'
+ExecStartPre=/bin/sh -c 'test -e /dev/bh1750 || modprobe bh1750_drv'
+ExecStartPre=/bin/sh -c 'test -e /dev/led_dev || modprobe led_drv'
+ExecStartPre=/bin/sh -c 'test -e /dev/motor_dev || modprobe motor_drv'
+ExecStart=/opt/retail/app/RetailClient
+ExecStop=/bin/kill -TERM $MAINPID
+
+# Auto-restart on crash
+Restart=always
+RestartSec=10
+
+# Circuit breaker: max 5 restarts per 300s window.
+# The application watchdog exits with code 42 to signal excessive crashes;
+# systemd then stops restarting.
+StartLimitInterval=300
+StartLimitBurst=5
+RestartPreventExitStatus=42
+
+Environment="QT_QPA_PLATFORM=linuxfb"
+Environment="QT_QPA_FB_DRM=1"
+Environment="DISPLAY=:0"
+Environment="LD_LIBRARY_PATH=/opt/retail/lib"
+
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits (optional, guard against OOM)
+# MemoryMax=256M
+# CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

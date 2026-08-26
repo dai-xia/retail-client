@@ -1,0 +1,127 @@
+# ============================================================
+# RetailSystem_RK3568 .gitignore
+# ============================================================
+
+# ---------- AI / IDE / Editor ----------
+.trae/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ---------- Local build configuration (per-developer paths) ----------
+client/local_config.pri
+
+# ---------- Secrets / Keys / Certificates ----------
+*.crt
+*.key
+*.pem
+*.p12
+crypto.key
+/etc/retail/
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Build outputs ----------
+build/
+build-*/
+client/build_arm64/
+server/build/
+*_autogen/
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+.qmake.stash
+.qmake.stash.internal
+*.pro.user
+*.pro.user.*
+
+# qmake-generated Makefiles (keep hand-written driver/deploy Makefiles)
+/Makefile
+client/Makefile
+client/Makefile.qmake
+server/Makefile
+server/Makefile.qmake
+
+.moc/
+.obj/
+.rcc/
+.uic/
+
+# ---------- Object files / libraries ----------
+*.o
+*.o.cmd
+*.o.d
+*.obj
+*.so
+*.so.*
+*.a
+*.dylib
+*.ko
+*.mod
+*.mod.c
+modules.order
+Module.symvers
+.tmp_versions/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---------- Qt / moc / uic ----------
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.moc
+
+# ---------- Executables ----------
+test_protocol
+proot*.deb
+*.deb
+*.rpm
+runtime/app/RetailClient
+driver/rc522_test
+driver/bh1750_test
+driver/led_test
+driver/motor_test
+driver/motor_pwm_test
+driver/dma_spi_test
+test/bench/bench_client
+test/bench/bench_client_x86
+test/bench/bench_server
+test/bench/bench_server_epoll
+test/bench/bench_server_iouring
+test/bench/bench_server_iouring_asan
+test/bench/bench_server_iouring_nobuf
+test/bench/arm64/
+
+# ---------- Model files (download via scripts/download_models.sh) ----------
+*.rknn
+*.onnx
+client/voice_model
+client/face_model/dummy.bin
+client/face_model/haarcascade_frontalface_default.xml
+client/face_model/quant_compare_report.md
+
+# ---------- Crash dumps / runtime data ----------
+*.dump
+core
+core.*
+/var/log/retail/
+
+# ---------- Third-party manuals (build not needed) ----------
+3rdparty/liburing/usr/local/man/
+
+# ---------- Local study / resume notes (do not publish) ----------
+docs/resume_modules_ai.md
+client/face_model/RKNN量化教程.md

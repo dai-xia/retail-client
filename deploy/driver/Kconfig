@@ -1,0 +1,79 @@
+#
+
+#
+
+
+#        cp -r deploy/driver ~/sourse/linux/rk356x_linux/kernel/drivers/retail
+
+#        source "drivers/retail/Kconfig"
+
+#        obj-$(CONFIG_RETAIL_DRIVERS) += retail/
+
+#       → Device Drivers → Retail System Drivers
+#
+
+
+
+
+
+
+
+#
+
+
+
+
+
+
+
+
+menu "Retail System Drivers"
+	depends on ARCH_ROCKCHIP
+
+config RETAIL_RC522
+	tristate "RC522 RFID Driver (SPI)"
+	depends on SPI
+	help
+	  RC522 RFID card reader driver for RK3568 platform.
+	  Supports ISO14443-A protocol, IRQ-driven card detection,
+	  MIFARE authentication and block read/write.
+
+	  Hardware: SPI0 bus, reset=GPIO1_B0, irq=GPIO1_B1
+
+	  If unsure, say M.
+
+config RETAIL_BH1750
+	tristate "BH1750 Light Sensor Driver (I2C)"
+	depends on I2C
+	help
+	  BH1750 ambient light sensor driver for RK3568 platform.
+	  Supports H-Res/L-Res/OneTime modes, MTreg adjustment.
+
+	  Hardware: I2C3 bus, address 0x23 (ADDR pin to GND)
+
+	  If unsure, say M.
+
+config RETAIL_LED
+	tristate "LED Indicator Driver (GPIO)"
+	depends on GPIOLIB
+	help
+	  Simple GPIO-based LED driver for status indication.
+	  Provides /dev/led_dev character device and sysfs interface.
+
+	  Hardware: GPIO1_D0 (gpio-56)
+
+	  If unsure, say M.
+
+config RETAIL_MOTOR
+	tristate "Motor Driver (GPIO + Timer)"
+	depends on GPIOLIB
+	help
+	  GPIO-based motor driver with non-blocking timer control.
+	  Motor rotates for a specified duration then auto-stops.
+	  Provides /dev/motor_dev character device and sysfs interface.
+
+	  Hardware: GPIO1_C7 (gpio-55)
+
+	  If unsure, say M.
+
+endmenu

@@ -1,0 +1,19 @@
+# Local build configuration template
+#
+# Copy this file to local_config.pri and fill in the paths for your machine.
+# local_config.pri is git-ignored and never committed.
+#
+#   cp local_config.pri.example local_config.pri
+#   # edit local_config.pri
+#
+# RetailClient.pro / RetailClient_ARM64.pro include local_config.pri if it
+# exists, so the variables below override the defaults.
+
+# Path to librknn_api inside the rknpu2 SDK
+RKNN_SDK_ROOT = /path/to/rknpu2/runtime/RK356X/Linux/librknn_api
+
+# Path to RGA headers extracted from the RK3568 sysroot
+RGA_INCLUDE = /path/to/rk3568_sysroot/usr/include/rga
+
+# Directory containing libvosk (Python site-packages or system)
+VOSK_LIB_DIR = /path/to/vosk

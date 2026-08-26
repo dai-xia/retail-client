@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>RechargeWidget</class>
+ <widget class="QWidget" name="RechargeWidget">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>600</width>
+    <height>500</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>余额充值</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QGroupBox" name="groupBox_auth">
+     <property name="title">
+      <string>会员认证</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_auth">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_uid">
+        <property name="text">
+         <string>IC卡UID:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="lineEdit_uid">
+        <property name="placeholderText">
+         <string>刷IC卡自动获取或手动输入</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_password">
+        <property name="text">
+         <string>登录密码:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="lineEdit_password">
+        <property name="echoMode">
+         <enum>QLineEdit::Password</enum>
+        </property>
+        <property name="placeholderText">
+         <string>输入登录密码</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QPushButton" name="btn_query_member">
+     <property name="text">
+      <string>查询会员信息</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_info">
+     <property name="title">
+      <string>账户信息</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_info">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_name_title">
+        <property name="text">
+         <string>姓名:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLabel" name="label_name">
+        <property name="text">
+         <string>--</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_balance_title">
+        <property name="text">
+         <string>当前余额:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="label_balance">
+        <property name="text">
+         <string>0.00 元</string>
+        </property>
+        <property name="styleSheet">
+         <string>font-size: 20px; font-weight: bold; color: #e94560;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_recharge">
+     <property name="title">
+      <string>充值</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_recharge">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_amount">
+        <property name="text">
+         <string>充值金额:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="doubleSpinBox_amount">
+        <property name="minimum">
+         <double>0.01</double>
+        </property>
+        <property name="maximum">
+         <double>9999.99</double>
+        </property>
+        <property name="value">
+         <double>50.00</double>
+        </property>
+        <property name="prefix">
+         <string>¥ </string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_pay_method">
+        <property name="text">
+         <string>支付方式:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="comboBox_pay_method">
+        <item>
+         <property name="text">
+          <string>模拟支付</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>支付宝（待接入）</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>微信支付（待接入）</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QPushButton" name="btn_recharge">
+     <property name="text">
+      <string>确认充值</string>
+     </property>
+     <property name="minimumSize">
+      <size>
+       <width>0</width>
+       <height>50</height>
+      </size>
+     </property>
+     <property name="styleSheet">
+      <string>font-size: 18px; font-weight: bold;</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="label_status">
+     <property name="text">
+      <string>请先认证会员身份</string>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignCenter</set>
+     </property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
