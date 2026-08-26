@@ -115,8 +115,8 @@ client/face_model/quant_compare_report.md
 
 # ---------- Crash dumps / runtime data ----------
 *.dump
-core
-core.*
+/core
+/core.*
 /var/log/retail/
 
 # ---------- Third-party manuals (build not needed) ----------
