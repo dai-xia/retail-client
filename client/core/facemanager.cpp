@@ -833,7 +833,7 @@ bool FaceManager::startStreaming(const QString &rtspUrl)
     config.height = m_streamHeight;
     config.fps    = m_streamFps;
     config.video_bit_rate = m_streamWidth * m_streamHeight * m_streamFps * 0.10;
-    config.audio_sample_rate = 0;
+    config.audio_sample_rate = 16000;
     config.audio_channels    = 1;
     config.audio_bit_rate    = 64000;
     config.use_tcp = true;
