@@ -9,53 +9,85 @@
 // Global watchdog instance: crash handlers cannot take user arguments.
 static watchdog_t *g_active_watchdog = NULL;
 
+/* long -> decimal string; async-signal-safe (no snprintf/malloc). Non-negative values only. */
+static void safe_ltoa(long v, char *buf)
+{
+    char tmp[24];
+    int i = 0;
+    do {
+        tmp[i++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v > 0);
+    while (i > 0) *buf++ = tmp[--i];
+    *buf = '\0';
+}
+
+/* Runs in the forked child: malloc/snprintf/backtrace_symbols_fd are safe here. */
+static void crash_dump_child(watchdog_t *wd, int sig, siginfo_t *si,
+                             void **frames, int frame_count)
+{
+    char path[WATCHDOG_DUMP_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/crash_%d_%ld.dump",
+             wd->dump_dir, getpid(), (long)time(NULL));
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        char header[512];
+        int n = snprintf(header, sizeof(header),
+                         "=== CRASH DUMP ===\n"
+                         "Signal: %d (%s)\n"
+                         "PID: %d\n"
+                         "Address: %p\n"
+                         "Time: %ld\n"
+                         "CrashCount: %d\n"
+                         "=== BACKTRACE ===\n",
+                         sig, strsignal(sig), getpid(),
+                         si ? si->si_addr : NULL,
+                         (long)time(NULL), wd->crash_count);
+        write(fd, header, n);
+        backtrace_symbols_fd(frames, frame_count, fd);
+        const char footer[] = "\n=== END ===\n";
+        write(fd, footer, sizeof(footer) - 1);
+        close(fd);
+    }
+
+    logger_flush(logger_get_default());
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *ctx)
 {
     (void)ctx;
     watchdog_t *wd = g_active_watchdog;
+    if (!wd) {
+        hw_watchdog_emergency_disable();
+        _exit(128 + sig);
+    }
 
-    if (wd) {
-        __sync_fetch_and_add(&wd->crash_count, 1);
+    __sync_fetch_and_add(&wd->crash_count, 1);
 
-        char path[WATCHDOG_DUMP_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/crash_%d_%ld.dump",
-                 wd->dump_dir, getpid(), (long)time(NULL));
+    /* Capture the crashing stack before fork; backtrace writes to our buffer (no malloc),
+     * and the forked child inherits this array for symbolization. */
+    void *frames[64];
+    int frame_count = backtrace(frames, 64);
 
-        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            char header[512];
-            int n = snprintf(header, sizeof(header),
-                             "=== CRASH DUMP ===\n"
-                             "Signal: %d (%s)\n"
-                             "PID: %d\n"
-                             "Address: %p\n"
-                             "Time: %ld\n"
-                             "CrashCount: %d\n"
-                             "=== BACKTRACE ===\n",
-                             sig, strsignal(sig), getpid(),
-                             si ? si->si_addr : NULL,
-                             (long)time(NULL), wd->crash_count);
-            write(fd, header, n);
+    /* Persist the crash timestamp with async-signal-safe calls only (OTA rollback counts this). */
+    char path[WATCHDOG_DUMP_PATH_MAX];
+    strcpy(path, wd->dump_dir);
+    strcat(path, "/crash_history");
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        char num[24];
+        safe_ltoa((long)time(NULL), num);
+        write(fd, num, strlen(num));
+        write(fd, "\n", 1);
+        close(fd);
+    }
 
-            void *frames[64];
-            int frame_count = backtrace(frames, 64);
-            backtrace_symbols_fd(frames, frame_count, fd);
-
-            char footer[] = "\n=== END ===\n";
-            write(fd, footer, sizeof(footer) - 1);
-            close(fd);
-        }
-
-        snprintf(path, sizeof(path), "%s/crash_history", wd->dump_dir);
-        fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) {
-            char buf[32];
-            int n = snprintf(buf, sizeof(buf), "%ld\n", (long)time(NULL));
-            write(fd, buf, n);
-            close(fd);
-        }
-
-        logger_flush(logger_get_default());
+    /* fork is async-signal-safe; the child performs symbolization safely. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        crash_dump_child(wd, sig, si, frames, frame_count);
+        _exit(0);
     }
 
     hw_watchdog_emergency_disable();
