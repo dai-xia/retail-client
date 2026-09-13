@@ -21,20 +21,6 @@ typedef struct alsa_capture_ctx alsa_capture_t;
  * @param channels   Number of channels (1=mono)
  * @param period_size Period size (samples read per frame, 1024 recommended)
  * @return Capture context, NULL on failure
- *
- * Key points:
- *   ALSA (Advanced Linux Sound Architecture) is the standard Linux audio framework:
- *   - Compared with arecord process approach:
- *     arecord: ALSA kernel buffer -> arecord process -> pipe -> QProcess -> app
- *     ALSA API: ALSA kernel buffer -> snd_pcm_readi() -> app (no intermediate steps)
- *   - Key concepts:
- *     period: number of samples transferred per hardware interrupt, determines latency
- *     buffer: ring buffer size, usually N times the period
- *     hw_params: hardware parameters (sample rate/format/channels), set during negotiation
- *   - MMAP mode:
- *     Like V4L2 MMAP, ALSA also supports mmap to read audio buffers
- *     But audio data is small (16kHz*2B=32KB/s), readi mode is sufficient
- *     MMAP is mainly used for low-latency professional audio scenarios
  */
 alsa_capture_t *alsa_capture_open(const char *device,
                                   unsigned int sample_rate,
@@ -42,13 +28,9 @@ alsa_capture_t *alsa_capture_open(const char *device,
                                   unsigned int period_size);
 
 /**
- * @brief Read one frame of PCM audio data
- * @param ctx    Capture context
- * @param buffer Output buffer
- * @param frames Number of frames to read (1 frame = channels samples)
- * @return Actual frames read, 0=no data, -1=error
- *
- * @note Returned PCM data format: S16_LE (16-bit signed little-endian), can be sent to Vosk directly
+ * @brief Read one frame of PCM audio (S16_LE interleaved, usable by Vosk directly)
+ * @param frames Frames to read (1 frame = channels samples)
+ * @return Frames read, 0=no data, -1=error
  */
 int alsa_capture_read(alsa_capture_t *ctx, void *buffer, unsigned int frames);
 
@@ -58,21 +40,12 @@ int alsa_capture_read(alsa_capture_t *ctx, void *buffer, unsigned int frames);
 void alsa_capture_close(alsa_capture_t **ctx);
 
 /**
- * @brief Stop capture and clear buffer (without closing device)
- *
- * Calls snd_pcm_drop to stop DMA transfer and flush residual data in the ring buffer,
- * solving the "ALSA buffer overrun after stopping reads" problem.
- * Used: when speech recognition pauses capture, to prevent XRUN caused by full ALSA buffer.
- * Must call alsa_capture_prepare() afterwards to restart capture.
+ * @brief Stop capture and discard buffered data (no close); must call alsa_capture_prepare() before reading again.
  */
 void alsa_capture_drop(alsa_capture_t *ctx);
 
 /**
- * @brief Re-prepare capture (recover after drop)
- *
- * Calls snd_pcm_prepare to reinitialize DMA transfer, starting capture from scratch.
- * Used: after alsa_capture_drop(), preparation before resuming capture.
- * @return 0=success, -1=failure
+ * @brief Re-prepare capture after drop() (or XRUN); 0=success, -1=failure.
  */
 int alsa_capture_prepare(alsa_capture_t *ctx);
 

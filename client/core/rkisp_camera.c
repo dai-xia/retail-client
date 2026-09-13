@@ -1,18 +1,6 @@
 /**
  * @file rkisp_camera.c
  * @brief MIPI camera capture (rkaiq 3A + rkisp ISP + V4L2 MPLANE)
- *
- * RK3568 MIPI cameras differ from USB (UVC) cameras:
- *   - MIPI sensors output RAW bayer data; ISP demosaic + 3A is required to
- *     produce NV12.
- *   - The ISP output node is MPLANE (multi-plane); v4l2_capture.c only handles
- *     single-plane, so this module uses the MPLANE path.
- *   - 3A (AE/AWB/AF) must be driven by rkaiq at runtime, otherwise the image is
- *     black or severely miscolored.
- *
- * Link: OV5695(RAW10) -> MIPI-CSI -> rkisp(demosaic+3A+NV12) -> /dev/videoX(MPLANE).
- * rkaiq prepare configures the sensor->CSI->ISP main link (equivalent to
- * media-ctl), so no manual media-ctl calls are needed.
  */
 
 #include "rkisp_camera.h"
@@ -31,9 +19,9 @@
 
 #include "rk_aiq_user_api2_sysctl.h"
 
-#define RKISP_BUFFER_COUNT 6   /* Buffer count, same as USB path */
+#define RKISP_BUFFER_COUNT 6   /* same as USB path */
 
-/* NV12 single plane (Y and UV contiguous), MPLANE mode plane count = 1 */
+/* NV12: single plane */
 #define RKISP_NUM_PLANES 1
 
 static int xioctl(int fd, unsigned long request, void *arg)
@@ -45,8 +33,7 @@ static int xioctl(int fd, unsigned long request, void *arg)
     return ret;
 }
 
-/* ---- rkaiq 3A cleanup callbacks (called by v4l2_capture_close to avoid
- * depending on the rkaiq header in the v4l2 module) ---- */
+/* rkaiq 3A cleanup callbacks (avoid rkaiq header dep in v4l2 module) */
 static void rkisp_aiq_stop(void *aiq_ctx)
 {
     if (aiq_ctx)
@@ -59,8 +46,7 @@ static void rkisp_aiq_deinit(void *aiq_ctx)
         rk_aiq_uapi2_sysctl_deinit((rk_aiq_sys_ctx_t *)aiq_ctx);
 }
 
-/* Scan /dev/video* for the rkisp ISP main output node (MPLANE capture device).
- * Returns 0=found, -1=not found */
+/* find rkisp MPLANE capture node; 0=found */
 static int find_rkisp_device(char *out_path, int path_len)
 {
     for (int i = 0; i < 32; i++) {
@@ -76,7 +62,6 @@ static int find_rkisp_device(char *out_path, int path_len)
             continue;
         }
 
-        /* Must be an MPLANE capture device (rkisp output); skip single-plane */
         bool is_mplane = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE) != 0;
         bool is_rkisp  = strstr((const char *)cap.driver, "rkisp") != NULL;
 
@@ -93,17 +78,13 @@ static int find_rkisp_device(char *out_path, int path_len)
     return -1;
 }
 
-/* MPLANE mmap buffer allocation + DMA-BUF export.
- * RKISP is a multi-plane device and only supports
- * V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; even though NV12 has a single plane, the
- * planes[] array interface must be used, otherwise ioctl returns -EINVAL. */
+/* MPLANE mmap + DMA-BUF export. NV12 single plane, but the planes[] interface is required. */
 static bool init_mplane_buffers(v4l2_capture_t *ctx)
 {
     struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
 
-    /* REQBUFS: kernel may return fewer than requested count.
-     * type MUST be MPLANE for RKISP; USERPTR/DMABUF are alternatives to MMAP. */
+    /* kernel may return fewer buffers than requested */
     req.count  = RKISP_BUFFER_COUNT;
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     req.memory = V4L2_MEMORY_MMAP;
@@ -113,8 +94,7 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
         return false;
     }
 
-    /* >=2 buffers needed for pipelining (1 filling, 1 processing); kernel may
-     * lower count under resource pressure */
+    /* need >=2 buffers */
     if (req.count < 2) {
         fprintf(stderr, "[RKISP] kernel only allocated %d buffers\n", req.count);
         return false;
@@ -127,8 +107,7 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
 
     for (unsigned int i = 0; i < req.count; i++) {
         struct v4l2_buffer buf;
-        /* MPLANE: offset/length are in planes[], not in buf top level.
-         * NV12 has 1 plane but the array interface is still required. */
+        /* MPLANE: offset/length live in planes[] */
         struct v4l2_plane planes[RKISP_NUM_PLANES];
         memset(&buf, 0, sizeof(buf));
         memset(planes, 0, sizeof(planes));
@@ -139,15 +118,13 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
         buf.m.planes = planes;
         buf.length   = RKISP_NUM_PLANES;
 
-        /* QUERYBUF: MPLANE stores m.mem_offset and length in planes[0], NOT
-         * buf.m.offset (single-plane examples read the wrong field here). */
+        /* MPLANE: m.mem_offset/length in planes[0] */
         if (xioctl(ctx->fd, VIDIOC_QUERYBUF, &buf) < 0) {
             fprintf(stderr, "[RKISP] QUERYBUF[%u] failed: %s\n", i, strerror(errno));
             return false;
         }
 
-        /* planes[0].m.mem_offset is the mmap offset (not a physical address).
-         * MAP_SHARED is mandatory for V4L2 mmap. */
+        /* MAP_SHARED required for V4L2 mmap */
         ctx->buffers[i].length = planes[0].length;
         ctx->buffers[i].start  = mmap(NULL, planes[0].length,
                                       PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -157,9 +134,7 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
             return false;
         }
 
-        /* EXPBUF: export DMA-BUF fd so RGA/RKNN/VPU access the physical memory
-         * directly (zero-copy). O_CLOEXEC avoids fd leak across exec.
-         * Failure here is non-fatal; dma_fds[i] is marked -1. */
+        /* EXPBUF: DMA-BUF fd for zero-copy VPU access; failure non-fatal */
         struct v4l2_exportbuffer exp;
         memset(&exp, 0, sizeof(exp));
         exp.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -173,8 +148,7 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
         }
     }
 
-    /* QBUF all buffers into the kernel free queue before STREAMON. MPLANE QBUF
-     * also requires buf.m.planes and buf.length to be filled. */
+    /* QBUF all before STREAMON */
     for (unsigned int i = 0; i < req.count; i++) {
         struct v4l2_buffer buf;
         struct v4l2_plane planes[RKISP_NUM_PLANES];
@@ -198,37 +172,21 @@ static bool init_mplane_buffers(v4l2_capture_t *ctx)
     return true;
 }
 
-/* Open RKISP MIPI camera: AIQ init, link config, V4L2 format, buffers, start.
- * @param iq_dir IQ file dir; NULL/empty uses system default /oem/etc/iqfiles.
- * Pipeline:
- *   1. find rkisp main output /dev/videoX
- *   2. open the ISP YUV output node (MPLANE capture, not subdev)
- *   3. reverse-lookup the sensor entity name bound to the video node for rkaiq
- *   4. rk_aiq_uapi2_sysctl_init: load IQ files (3A, lens shading, ISP params)
- *   5. rk_aiq_uapi2_sysctl_prepare: configure media link (sensor-dphy-cif-isp),
- *      sensor resolution / MIPI timing
- *   6. rk_aiq_uapi2_sysctl_start: launch 3A threads (AE/AWB/AF)
- *   7. VIDIOC_S_FMT: set NV12 MPLANE output; kernel returns aligned WxH
- *   8. init_mplane_buffers: REQBUFS/QUERYBUF/mmap/EXPBUF/QBUF
- *   9. VIDIOC_STREAMON: start MIPI-CSI/ISP hardware, capture begins
- * On error all branches roll back (stop/deinit aiq, close fd, free memory).
- * Note: STREAMON is done inside open(); the caller must DQBUF in a loop
- * afterwards or frames will be dropped. */
+/* rkaiq init/prepare/start + S_FMT(NV12 MPLANE) + buffers + STREAMON.
+ * On error all branches roll back. Caller must DQBUF in a loop after open. */
 v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int fps)
 {
     char dev_path[32];
-    /* Scan v4l2 devices to find the rkisp_mainpath /dev/videoX node
-     * (ISP NV12 output, MPLANE, not a subdev or rawrd node) */
     if (find_rkisp_device(dev_path, sizeof(dev_path)) != 0)
         return NULL;
 
     v4l2_capture_t *ctx = (v4l2_capture_t *)calloc(1, sizeof(v4l2_capture_t));
     if (!ctx) return NULL;
     ctx->fd = -1;
-    ctx->is_mplane = true;       /* MPLANE capture device for the whole path */
+    ctx->is_mplane = true;       /* MPLANE path */
     for (int i = 0; i < 8; i++) ctx->dma_fds[i] = -1;
 
-    /* 1. Open ISP YUV output node; O_RDWR required (some ioctls fail read-only) */
+    /* O_RDWR required */
     ctx->fd = open(dev_path, O_RDWR);
     if (ctx->fd < 0) {
         fprintf(stderr, "[RKISP] open %s failed: %s\n", dev_path, strerror(errno));
@@ -236,10 +194,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
         return NULL;
     }
 
-    /* 2. rkaiq: reverse-lookup the sensor entity name bound to the video node.
-     * Each sensor subdev has an entity name (e.g. "m01_f_ov5695 1-0036");
-     * rk_aiq_uapi2_sysctl_init needs it to bind the matching IQ file.
-     * Without it rkaiq cannot tell which camera is being driven and fails. */
+    /* rkaiq needs the sensor entity name to bind the IQ file */
     const char *sns_name = rk_aiq_uapi2_sysctl_getBindedSnsEntNmByVd(dev_path);
     if (!sns_name || sns_name[0] == '\0') {
         fprintf(stderr, "[RKISP] cannot get sensor entity name\n");
@@ -249,9 +204,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
     }
     fprintf(stdout, "[RKISP] sensor entity: %s\n", sns_name);
 
-    /* 3. rkaiq init: load IQ files (exposure, white balance, denoise, lens
-     * shading). NULL/empty iq_dir falls back to /oem/etc/iqfiles. init does
-     * NOT touch hardware. */
+    /* load IQ files; NULL iq_dir -> /oem/etc/iqfiles */
     const char *iq_path = (iq_dir && iq_dir[0]) ? iq_dir : "/oem/etc/iqfiles";
     rk_aiq_sys_ctx_t *aiq = rk_aiq_uapi2_sysctl_init(sns_name, iq_path, NULL, NULL);
     if (!aiq) {
@@ -264,10 +217,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
     ctx->aiq_stop   = rkisp_aiq_stop;
     ctx->aiq_deinit = rkisp_aiq_deinit;
 
-    /* 4. rkaiq prepare (critical): configures the media link sensor->csi2-dphy
-     * ->cif->isp and the sensor subdev (resolution, MIPI lanes, MCLK, timing).
-     * No manual subdev ioctls needed. After prepare hardware params are set
-     * but no image output yet. */
+    /* prepare: configures sensor->CSI->ISP media link; no manual subdev ioctls */
     if (rk_aiq_uapi2_sysctl_prepare(aiq, (uint32_t)width, (uint32_t)height,
                                     RK_AIQ_WORKING_MODE_NORMAL) != XCAM_RETURN_NO_ERROR) {
         fprintf(stderr, "[RKISP] rkaiq prepare failed\n");
@@ -277,9 +227,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
         return NULL;
     }
 
-    /* 5. rkaiq start: launch the 3A background threads (AE/AWB/AF). They read
-     * image statistics and adjust sensor exposure/gain and ISP params. MIPI
-     * stream is NOT started yet. */
+    /* start 3A threads */
     if (rk_aiq_uapi2_sysctl_start(aiq) != XCAM_RETURN_NO_ERROR) {
         fprintf(stderr, "[RKISP] rkaiq start failed\n");
         rk_aiq_uapi2_sysctl_deinit(aiq);
@@ -288,10 +236,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
         return NULL;
     }
 
-    /* 6. VIDIOC_S_FMT: RKISP only accepts MPLANE; use pix_mp, not pix.
-     * S_FMT is bidirectional: pass desired WxH, kernel returns the actually
-     * aligned WxH (e.g. width aligned to 16, height to 8). MUST save the
-     * returned values, do not reuse the input width/height. */
+    /* S_FMT is bidirectional: save the returned aligned WxH */
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -312,8 +257,6 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
     ctx->pixfmt = fmt.fmt.pix_mp.pixelformat;
     ctx->fps    = fps;
 
-    /* 7. MPLANE buffers: REQBUFS/QUERYBUF/mmap/EXPBUF/QBUF. After this buffers
-     * are queued but hardware is not yet streaming. */
     if (!init_mplane_buffers(ctx)) {
         rk_aiq_uapi2_sysctl_stop(aiq, false);
         rk_aiq_uapi2_sysctl_deinit(aiq);
@@ -321,9 +264,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
         return NULL;
     }
 
-    /* 8. STREAMON: starts MIPI-DPHY/CIF/ISP hardware, sensor outputs MIPI data.
-     * Placed inside open() to align with the USB camera API; the caller must
-     * DQBUF in a loop or the queue fills and frames drop. */
+    /* caller must DQBUF in a loop or frames drop */
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if (xioctl(ctx->fd, VIDIOC_STREAMON, &type) < 0) {
         fprintf(stderr, "[RKISP] STREAMON failed: %s\n", strerror(errno));
@@ -341,8 +282,7 @@ v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int
 
 #else  /* !HAVE_RKAIQ */
 
-/* x86 dev host / no rkaiq: MIPI path unavailable, return NULL so the caller
- * falls back to USB */
+/* no rkaiq: return NULL, caller falls back to USB */
 v4l2_capture_t *rkisp_camera_open(const char *iq_dir, int width, int height, int fps)
 {
     (void)iq_dir; (void)width; (void)height; (void)fps;

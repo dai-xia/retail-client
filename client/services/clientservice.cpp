@@ -72,8 +72,6 @@ void ClientService::requestOtaFile(const QString &version, const QString &filena
     cJSON_Delete(req);
 }
 
-// -- Business request implementations --
-
 void ClientService::requestMemberQuery(const QString &uid)
 {
     cJSON *root = cJSON_CreateObject();
@@ -212,8 +210,6 @@ void ClientService::requestGoodsSyncReport()
     qDebug() << "Notified server of stock change, total" << goodsList.size() << "items";
 }
 
-// -- Local database operations --
-
 int ClientService::localAddGoods(const QString &name, double price,
                                   const QString &unit, int stock)
 {
@@ -245,8 +241,6 @@ int ClientService::localDeductStock(int id, int qty)
 {
     return LocalDBManager::getInstance()->deductStock(id, qty);
 }
-
-// -- Server data processing --
 
 void ClientService::onConnected()
 {
@@ -473,7 +467,6 @@ void ClientService::onServerData(QString jsonData)
     } else if (cmd == "member_sync") {
         processMemberSync(root);
     } else if (cmd == "monitor_start") {
-        /* Server command: start monitor - client opens camera + RTSP push */
         cJSON *urlItem = cJSON_GetObjectItem(root, "rtsp_url");
         if (!urlItem || !urlItem->valuestring)
             urlItem = cJSON_GetObjectItem(root, "rtmp_url");  /* Back-compat with server field name */
@@ -481,7 +474,6 @@ void ClientService::onServerData(QString jsonData)
         qDebug() << "Server monitor command received: monitor_start, rtsp_url:" << rtspUrl;
         emit signalMonitorStart(rtspUrl);
     } else if (cmd == "monitor_stop") {
-        /* Server command: stop monitor */
         qDebug() << "Server monitor command received: monitor_stop";
         emit signalMonitorStop();
     } else {

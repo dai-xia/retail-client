@@ -75,7 +75,6 @@ int watchdog_install_signal_handlers(watchdog_t *wd)
     sa.sa_flags = SA_SIGINFO | SA_RESETHAND;  // detailed info + reset default after first trigger
     sigemptyset(&sa.sa_mask);
 
-    // Crash signals: segfault, abort, FPE, bus, illegal instruction, trap
     int crash_signals[] = {SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL, SIGTRAP};
     for (size_t i = 0; i < sizeof(crash_signals) / sizeof(crash_signals[0]); i++) {
         if (sigaction(crash_signals[i], &sa, NULL))
@@ -263,13 +262,13 @@ int watchdog_check_startup_safety(const char *dump_dir)
         line = strtok(NULL, "\n");
     }
 
-    if (recent_crashes >= WATCHDOG_MAX_CRASH_COUNT) {  // trip threshold reached
+    if (recent_crashes >= WATCHDOG_MAX_CRASH_COUNT) {
         LOGE("startup fuse: %d crashes within %d s (threshold %d), refusing to start",
              recent_crashes, WATCHDOG_CRASH_WINDOW_SEC, WATCHDOG_MAX_CRASH_COUNT);
         return -1;
     }
 
-    if (recent_crashes > 0) {  // crashes present but below fuse limit
+    if (recent_crashes > 0) {
         LOGW("crash warning: %d crashes within %d s, last one %ld s ago",
              recent_crashes, WATCHDOG_CRASH_WINDOW_SEC, (long)(now - latest));
     }

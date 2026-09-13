@@ -34,7 +34,7 @@ extern "C" {
 #include "rtsp_streamer.h"
 
 /**
- * @brief Face detection rectangle (replaces cv::Rect, removes OpenCV dependency)
+ * @brief Face detection rectangle.
  */
 struct FaceRect {
     int x;
@@ -44,11 +44,9 @@ struct FaceRect {
 };
 
 /**
- * @brief Face manager singleton class
+ * @brief Face manager singleton.
  *
- * Pure zero-copy architecture (RK3568):
- *   Main pipeline (monitoring stream): V4L2 MMAP -> NV12 original -> VPU hardware encoding -> RTSP stream
- *   Auxiliary pipeline (face recognition): same NV12 original -> RGA to BGR -> face detection + recognition
+ * Zero-copy: V4L2 MMAP -> NV12 -> VPU/RTSP; NV12 -> RGA BGR -> face detect/recognize.
  */
 class FaceManager : public QObject
 {
@@ -119,31 +117,24 @@ signals:
     void signalRecordingChanged(bool on);
 
 private:
-    /* ==================== Initialization ==================== */
     void initModels();
 
-    /* ==================== Model loading ==================== */
     bool loadRknnModel(const char *path, rknn_context *ctx, unsigned char **data, int *size);
 
-    /* ==================== Face detection (internal) ==================== */
     struct PriorBox { float cx, cy, w, h; };
     std::vector<PriorBox> m_detectPriors;
     void generateUltraFacePriors();
     std::vector<FaceRect> detectFaceFd(int src_fd);       /* DMA-BUF zero-copy */
     std::vector<FaceRect> decodeUltraFaceOutputs(rknn_output outputs[2], int img_w, int img_h);
 
-    /* ==================== Feature extraction (internal) ==================== */
     QVector<float> extractFeatureRknnFd();                 /* m_featureInputFd -> RKNN NPU */
 
-    /* ==================== Feature library persistence ==================== */
     void saveFeatureModel();
     void loadFeatureModel();
 
-    /* ==================== Monitor thread ==================== */
     void monitorThreadFunc();
     void audioThreadFunc();
 
-    /* ==================== Member variables ==================== */
     /* Camera */
     bool             m_isCameraOpened;
     v4l2_capture_t  *m_v4l2Ctx;

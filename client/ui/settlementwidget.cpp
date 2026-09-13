@@ -184,7 +184,6 @@ void SettlementWidget::refreshGoodsTable()
         ui->tableWidget_goods->setItem(i, 1, new QTableWidgetItem(QString::number(g.price, 'f', 2)));
         ui->tableWidget_goods->setItem(i, 2, new QTableWidgetItem(QString::number(g.stock)));
 
-        // Column 3: embed SpinBox + Add button
         QWidget *opWidget = new QWidget();
         QHBoxLayout *opLayout = new QHBoxLayout(opWidget);
         opLayout->setContentsMargins(2, 2, 2, 2);

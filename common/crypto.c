@@ -63,16 +63,7 @@ int crypto_init(const char *key_file)
     return 0;
 }
 
-/*
- * AES-256-GCM encryption
- *
- * Output layout:
- *   IV(12 bytes) | ciphertext (same length as plaintext, GCM has no padding) | TAG(16 bytes)
- *
- * GCM = CTR-mode encryption + GMAC authentication, providing both
- * confidentiality and integrity. On decryption EVP_DecryptFinal verifies
- * the TAG automatically and returns -1 on mismatch.
- */
+/* Output layout: IV(12) | ciphertext | TAG(16). Caller frees *out. */
 int crypto_encrypt(const unsigned char *plaintext, int plain_len,
                    unsigned char **out, int *out_len)
 {
@@ -133,15 +124,7 @@ err:
     return -1;
 }
 
-/*
- * AES-256-GCM decryption
- *
- * Input layout:
- *   IV(12 bytes) | ciphertext | TAG(16 bytes)
- *
- * OpenSSL requires the expected TAG to be set before EVP_DecryptFinal,
- * which then performs a constant-time comparison. Returns -1 on mismatch.
- */
+/* Input layout: IV(12) | ciphertext | TAG(16). Caller frees *out. */
 int crypto_decrypt(const unsigned char *ciphertext, int cipher_len,
                    unsigned char **out, int *out_len)
 {
@@ -183,7 +166,7 @@ int crypto_decrypt(const unsigned char *ciphertext, int cipher_len,
                             (void *)tag) != 1) goto err;
 
     if (EVP_DecryptFinal_ex(ctx, *out + total, &len) != 1) {
-        /* TAG verification failed: ciphertext tampered or wrong key */
+        /* TAG mismatch: tampered data or wrong key */
         fprintf(stderr, "[CRYPTO] GCM TAG verification FAILED — data tampered or wrong key\n");
         goto err;
     }

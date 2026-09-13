@@ -16,15 +16,7 @@ extern "C" {
 typedef struct AVFormatContext AVFormatContext;
 typedef struct AVStream AVStream;
 
-/**
- * @brief RTSP streamer config
- *
- * Why RTSP (vs RTMP):
- *   1. de-facto standard in surveillance (Hikvision/Dahua/Uniview IPC default)
- *   2. low latency: RTP over UDP < 500ms, RTMP usually 1-3s
- *   3. clean protocol stack (SDP + RTP + RTCP), easy to reason about
- *   4. NVR/IPC backend compatible, server can transcode to GB28181
- */
+/** @brief RTSP streamer config */
 typedef struct {
     char     rtsp_url[256];     /* RTSP URL, e.g. "rtsp://server:8554/live/cam01" */
     int      width;
@@ -38,17 +30,7 @@ typedef struct {
     int64_t  base_time_ms;      /* PTS baseline (ms); 0=auto CLOCK_MONOTONIC; nonzero=reuse on reconnect to avoid PTS cliff */
 } rtsp_streamer_config_t;
 
-/**
- * @brief RTSP streamer context
- *
- * Data flow:
- *   V4L2 NV12 -> VPU HW H264 encode -> RTP packetize -> RTSP -> server
- *
- * Key optimizations:
- *   1. h264_rkmpp VPU HW encode: NV12 direct zero-copy, zero CPU
- *   2. RTP payload type: H264 (96) + AAC (97)
- *   3. time base: video = 1/fps, audio = 1/sample_rate
- */
+/** @brief RTSP streamer context */
 typedef struct {
     AVFormatContext *fmt_ctx;          /* RTSP muxer context (RTP muxer) */
     AVStream        *video_st;
@@ -63,40 +45,18 @@ typedef struct {
 } rtsp_streamer_t;
 
 
-/**
- * @brief Connect to RTSP server and initialize the streamer
- *
- * Init chain:
- *   1. avformat_alloc_output_context2("rtsp") -> RTP muxer
- *   2. set RTSP transport (TCP/UDP) via AVOptions
- *   3. avformat_new_stream -> H264 video stream + AAC audio stream
- *   4. video_encoder_open -> VPU HW encoder
- *   5. avio_open -> RTSP ANNOUNCE + SETUP + RECORD
- *   6. avformat_write_header -> SDP negotiation
- */
+/** @brief Connect to RTSP server and initialize the streamer */
 rtsp_streamer_t *rtsp_streamer_open(const rtsp_streamer_config_t *config);
 
 /**
- * @brief Push one NV12 frame via DMA-BUF fd (HW encode zero-copy)
- *
- * V4L2 EXPBUF -> DMA-BUF fd -> h264_rkmpp VPU DMA direct read -> H264 -> RTP -> RTSP.
- * CPU never touches the NV12->H264 path.
- *
- * @param fd        DMA-BUF fd exported by V4L2 EXPBUF
- * @param data_size NV12 frame size (width*height*3/2)
- * @return -1=failed, 0=sent, 1=encoder buffered, no output yet (normal)
+ * @brief Push one NV12 frame via DMA-BUF fd (HW zero-copy: fd -> h264_rkmpp VPU -> RTSP)
+ * @return -1=failed, 0=sent, 1=encoder buffered, no output yet
  */
 int rtsp_streamer_send_nv12(rtsp_streamer_t *ctx, int fd, int data_size);
 
 /**
- * @brief Push one NV12 frame via virtual address pointer (SW encode path)
- *
- * V4L2 mmap virtual address -> libx264 SW encode -> H264 -> RTP -> RTSP.
- * Fallback when h264_rkmpp is unavailable.
- *
- * @param nv12_data NV12 frame data pointer (virtual address)
- * @param data_size NV12 frame size (width*height*3/2)
- * @return -1=failed, 0=sent, 1=encoder buffered, no output yet (normal)
+ * @brief Push one NV12 frame via virtual address pointer (SW libx264 fallback)
+ * @return -1=failed, 0=sent, 1=encoder buffered, no output yet
  */
 int rtsp_streamer_send_nv12_ptr(rtsp_streamer_t *ctx, const void *nv12_data, int data_size);
 

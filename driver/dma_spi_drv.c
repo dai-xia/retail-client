@@ -1,138 +1,5 @@
 /*
- * DMA SPI Transfer Driver — In-depth DMA Transfer Example
- *
- * Platform: RK3568
- * Bus: SPI + DMA
- * Framework: platform_driver + DMA Engine API
- *
- * Features:
- *   - Uses DMA for large-block SPI transfers (CPU zero-copy)
- *   - Supports independent TX/RX DMA channels
- *   - Character device /dev/dma_spi provides read/write/ioctl interface
- *   - sysfs attributes expose DMA status
- *   - Complete DMA transfer flow demonstration
- *
- * Hardware wiring (SPI peripheral → RK3568):
- *   MOSI → SPI0_MOSI
- *   MISO → SPI0_MISO
- *   SCK  → SPI0_CLK
- *   CS   → GPIO (chip select)
- *
- * Device tree:
- *   &spi0 {
- *       dma_spi@0 {
- *           compatible = "retail,dma-spi";
- *           reg = <0>;
- *           spi-max-frequency = <10000000>;
- *           dmas = <&dmac 0>, <&dmac 1>;
- *           dma-names = "tx", "rx";
- *       };
- *   };
- *
- * ==================== Interview Knowledge Points ====================
- *
- * 1. DMA (Direct Memory Access)
- *
- *    DMA is a mechanism that allows peripherals to directly access system
- *    memory without CPU involvement for each data transfer. The CPU only
- *    needs to configure the DMA controller, then continue executing other
- *    tasks; when the DMA transfer completes, the CPU is notified via interrupt.
- *
- *    Advantages:
- *      - CPU zero-copy: data goes directly from peripheral to memory, bypassing CPU
- *      - Bulk transfer: suitable for large data blocks (KB~MB level)
- *      - Reduced CPU load: CPU can process other tasks in parallel
- *
- *    Disadvantages:
- *      - Setup overhead: configuring DMA descriptors has some latency
- *      - Not worthwhile for small data: PIO is faster below ~64 bytes
- *      - Cache coherency issues: need dma_map_single to handle
- *
- * 2. Linux DMA Engine API
- *
- *    The Linux kernel provides a unified DMA engine framework that abstracts
- *    out the DMA controller differences across different SoCs.
- *
- *    Core API call flow:
- *
- *      Step 1: Request a DMA channel
- *        dma_request_chan(dev, name) → struct dma_chan *
- *
- *      Step 2: Allocate DMA buffer
- *        dma_alloc_coherent(dev, size, &dma_handle, GFP_KERNEL)
- *        → void *cpu_addr, dma_addr_t dma_handle
- *
- *        Or use streaming mapping:
- *        dma_map_single(dev, cpu_addr, size, direction)
- *        → dma_addr_t
- *
- *      Step 3: Prepare the transfer descriptor
- *        dmaengine_prep_slave_single(chan, dma_addr, len, dir, flags)
- *        → struct dma_async_tx_descriptor *
- *
- *        Configure callback:
- *        desc->callback = my_callback;
- *        desc->callback_param = my_data;
- *
- *      Step 4: Submit and start the transfer
- *        dmaengine_submit(desc);
- *        dma_async_issue_pending(chan);
- *
- *      Step 5: Wait for completion
- *        dma_async_tx_callback  — asynchronous callback
- *        dma_wait_for_async_tx  — synchronous wait
- *
- *      Step 6: Cleanup
- *        dma_unmap_single(dev, dma_addr, size, dir);
- *        dma_release_channel(chan);
- *        dma_free_coherent(dev, size, cpu_addr, dma_handle);
- *
- * 3. DMA address types
- *
- *    Bus Address / DMA Address:
- *      - The address seen by the DMA controller
- *      - On systems with an IOMMU, not equal to physical address
- *      - Obtained via dma_map_single / dma_alloc_coherent
- *
- *    Physical Address:
- *      - Actual memory hardware address
- *      - Equals DMA address when no IOMMU is present
- *
- *    Virtual Address:
- *      - The address seen by the CPU (kernel space)
- *      - The address returned by kmalloc/kzalloc/vmalloc
- *
- * 4. Cache coherency issues
- *
- *    Coherent DMA mapping (Coherent):
- *      dma_alloc_coherent — allocated memory is directly accessible by both CPU and DMA
- *      No need to manually flush the cache, but allocation cost is high
- *
- *    Streaming DMA mapping (Streaming):
- *      dma_map_single — maps ordinary memory as DMA-accessible
- *      Requires manual cache management:
- *        DMA_TO_DEVICE:   dma_sync_single_for_device  (flush before write)
- *        DMA_FROM_DEVICE: dma_sync_single_for_cpu      (invalidate before read)
- *        DMA_BIDIRECTIONAL: bidirectional
- *
- * 5. SPI + DMA transfer
- *
- *    Traditional SPI PIO approach:
- *      spi_write / spi_read — only a few bytes per transfer
- *      CPU polls or interrupts to wait for transfer completion
- *
- *    SPI DMA approach:
- *      spi_async + DMA — suitable for bulk data transfer
- *      A single transfer can be 64KB+
- *      CPU can do other work during DMA transfer
- *
- * 6. Real-world application scenarios
- *
- *    - TFT LCD display: frame buffer DMA transfer (320x240x2 = 150KB/frame)
- *    - Audio codec: PCM data DMA transfer
- *    - SD card / eMMC: block data DMA read/write
- *    - Sensor array: batch sample data DMA transfer
- *    - OTA firmware upgrade: large firmware package written to SPI Flash
+ * DMA SPI Transfer Driver — SPI + DMA Engine
  */
 
 #define pr_fmt(fmt) "dma_spi: " fmt
@@ -157,23 +24,12 @@
 #define DMA_SPI_BUF_SIZE    65536   /* 64KB DMA buffer */
 #define DMA_SPI_MAX_TRANSFER 32768  /* Max 32KB per transfer */
 
-/* ======================== ioctl commands ======================== */
 #define DMA_SPI_IOC_MAGIC       'D'
 #define DMA_SPI_IOC_GET_STATS   _IOR(DMA_SPI_IOC_MAGIC, 1, struct dma_spi_stats)
 #define DMA_SPI_IOC_RESET_STATS _IO(DMA_SPI_IOC_MAGIC, 2)
 #define DMA_SPI_IOC_SET_SPEED   _IOW(DMA_SPI_IOC_MAGIC, 3, u32)
 #define DMA_SPI_IOC_GET_SPEED   _IOR(DMA_SPI_IOC_MAGIC, 4, u32)
 
-/*
- * DMA transfer statistics
- *
- * These statistics show the throughput and efficiency of DMA.
- * For example: if bytes_transferred is large but transfer_count is small,
- * it means each transfer is a large block, and DMA efficiency is high.
- * If transfer_count is large but bytes_transferred is small,
- * it means many small data transfers, where DMA overhead is proportionally
- * high — PIO would be better.
- */
 struct dma_spi_stats {
 	u32 transfer_count;      /* Total number of transfers */
 	u32 bytes_transferred;   /* Total bytes transferred */
@@ -214,17 +70,7 @@ struct dma_spi_data {
 	u32                  max_speed_hz;
 };
 
-/* ======================== DMA callback ======================== */
-
-/*
- * DMA transfer completion callback
- *
- * Executes in the DMA interrupt context; cannot do time-consuming operations.
- * Here it only sends the completion signal to let the waiting process continue.
- *
- * Note: cannot call mutex_lock in the callback, cannot sleep,
- *       cannot call functions that may block.
- */
+/* DMA completion callback — interrupt context */
 static void dma_spi_tx_callback(void *param)
 {
 	struct completion *done = param;
@@ -237,27 +83,6 @@ static void dma_spi_rx_callback(void *param)
 	complete(done);
 }
 
-/* ======================== DMA transfer core ======================== */
-
-/*
- * dma_spi_transfer — SPI full-duplex transfer using DMA
- *
- * This is the core function of DMA transfer, demonstrating the complete
- * DMA programming flow.
- *
- * Flow:
- *   1. Copy user data to the DMA TX buffer
- *   2. dma_map_single streaming mapping (ensure cache coherency)
- *   3. dmaengine_prep_slave_single to prepare TX descriptor
- *   4. Set callback → dmaengine_submit → dma_async_issue_pending
- *   5. Similarly prepare RX descriptor
- *   6. Trigger SPI transfer (spi_async or direct SPI controller operation)
- *   7. wait_for_completion to wait for DMA completion
- *   8. dma_unmap_single to unmap
- *   9. Copy RX data back to user space
- *
- * Return value: actual bytes transferred, negative = error
- */
 static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 				const u8 *tx_data, u8 *rx_data,
 				size_t len)
@@ -276,56 +101,11 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 
 	start = ktime_get();
 
-	/* Step 1: Copy transmit data to DMA buffer */
 	if (tx_data)
 		memcpy(dev->tx_buf, tx_data, len);
 	else
 		memset(dev->tx_buf, 0, len);
 
-	/*
-	 * Step 2: DMA streaming mapping
-	 *
-	 * dma_map_single — maps a virtual address to a DMA address
-	 *
-	 * Parameters:
-	 *   &dev->spi->dev   — device pointer (used for IOMMU)
-	 *   dev->tx_buf      — CPU virtual address
-	 *   len              — mapping length
-	 *   DMA_TO_DEVICE    — data transfer direction (CPU→device)
-	 *
-	 * Return value: DMA address (bus address)
-	 *
-	 * Note: For DMA_TO_DEVICE, the kernel flushes the CPU cache before
-	 *       mapping, ensuring the DMA controller reads the latest data.
-	 */
-	if (dma_map_single(&dev->spi->dev, dev->tx_buf, len,
-			   DMA_TO_DEVICE)) {
-		dev_err(&dev->spi->dev, "TX DMA map failed\n");
-		return -ENOMEM;
-	}
-
-	/*
-	 * Step 3: Prepare the DMA transfer descriptor
-	 *
-	 * dmaengine_prep_slave_single — prepare a single-buffer transfer
-	 *
-	 * Parameters:
-	 *   chan             — DMA channel
-	 *   dev->tx_dma      — source address (DMA address)
-	 *   len              — transfer length
-	 *   DMA_MEM_TO_DEV   — transfer direction (memory→device)
-	 *   DMA_PREP_INTERRUPT | DMA_CTRL_ACK
-	 *     DMA_PREP_INTERRUPT — trigger interrupt after transfer completes
-	 *     DMA_CTRL_ACK       — auto-acknowledge descriptor
-	 *
-	 * Return value: struct dma_async_tx_descriptor *
-	 *               NULL = failure
-	 *
-	 * Other prep functions:
-	 *   dmaengine_prep_slave_sg  — scatter-gather transfer
-	 *   dmaengine_prep_dma_cyclic — cyclic transfer (audio)
-	 *   dmaengine_prep_dma_memcpy — memory-to-memory copy
-	 */
 	reinit_completion(&dev->tx_done);
 
 	tx_desc = dmaengine_prep_slave_single(dev->tx_chan,
@@ -338,26 +118,12 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 		goto err_unmap_tx;
 	}
 
-	/*
-	 * Step 4: Set callback and submit
-	 *
-	 * The callback is invoked when the DMA transfer completes (interrupt context).
-	 * Here completion is used to implement synchronous waiting.
-	 */
 	tx_desc->callback = dma_spi_tx_callback;
 	tx_desc->callback_param = &dev->tx_done;
 
-	/*
-	 * dmaengine_submit — adds the descriptor to the DMA channel's pending queue
-	 * dma_async_issue_pending — starts the DMA transfer
-	 *
-	 * Note: submitting is not the same as starting! You must submit first, then issue_pending.
-	 *       This allows batch submission of multiple descriptors before a single start.
-	 */
 	dmaengine_submit(tx_desc);
 	dma_async_issue_pending(dev->tx_chan);
 
-	/* RX direction: same flow */
 	if (rx_data) {
 		reinit_completion(&dev->rx_done);
 
@@ -377,12 +143,6 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 		dma_async_issue_pending(dev->rx_chan);
 	}
 
-	/*
-	 * Step 5: Trigger SPI transfer
-	 *
-	 * DMA descriptors are ready; now trigger the actual transfer via the SPI framework.
-	 * The SPI controller will automatically use the DMA channels for data transfer.
-	 */
 	memset(&t, 0, sizeof(t));
 	t.tx_buf = dev->tx_buf;
 	t.rx_buf = rx_data ? dev->rx_buf : NULL;
@@ -399,17 +159,6 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 		goto err_unmap_tx;
 	}
 
-	/*
-	 * Step 6: Wait for DMA completion
-	 *
-	 * wait_for_completion — blocks until DMA transfer completes
-	 *
-	 * Timeout 5 seconds, prevents the process from blocking forever if DMA hangs.
-	 * In production, the timeout should be adjusted based on actual transfer size.
-	 *
-	 * Note: If using asynchronous mode, you don't have to wait,
-	 *       let the callback notify user space directly (via poll/signal).
-	 */
 	if (tx_data) {
 		if (!wait_for_completion_timeout(&dev->tx_done,
 						 msecs_to_jiffies(5000))) {
@@ -430,23 +179,11 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 		}
 	}
 
-	/*
-	 * Step 7: Unmap DMA mapping
-	 *
-	 * For DMA_FROM_DEVICE mappings, the CPU cache must be invalidated
-	 * before dma_unmap_single, so the CPU can read the data written by the device.
-	 *
-	 * dma_unmap_single handles cache sync internally:
-	 *   DMA_FROM_DEVICE → invalidate CPU cache
-	 *   DMA_TO_DEVICE   → no operation needed (data already sent)
-	 */
 	dma_unmap_single(&dev->spi->dev, dev->tx_dma, len, DMA_TO_DEVICE);
 
-	/* Copy received data back to the user-provided buffer */
 	if (rx_data)
 		memcpy(rx_data, dev->rx_buf, len);
 
-	/* Update statistics */
 	end = ktime_get();
 	dev->stats.transfer_count++;
 	dev->stats.bytes_transferred += len;
@@ -460,8 +197,6 @@ static ssize_t dma_spi_transfer(struct dma_spi_data *dev,
 	dev->stats.dma_errors++;
 	return ret;
 }
-
-/* ======================== Character device operations ======================== */
 
 static struct dma_spi_data *dma_spi_from_file(struct file *filp)
 {
@@ -477,13 +212,7 @@ static int dma_spi_open(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-/*
- * write — send data to the SPI peripheral via DMA
- *
- * Data written by user space is copied to the DMA buffer, then sent to
- * the SPI peripheral via DMA. Suitable for sending large amounts of data
- * (e.g. LCD frame buffer).
- */
+/* write(): send data to SPI peripheral via DMA */
 static ssize_t dma_spi_write(struct file *filp, const char __user *buf,
 			     size_t count, loff_t *off)
 {
@@ -496,7 +225,6 @@ static ssize_t dma_spi_write(struct file *filp, const char __user *buf,
 	if (count > DMA_SPI_MAX_TRANSFER)
 		count = DMA_SPI_MAX_TRANSFER;
 
-	/* Copy data from user space */
 	kbuf = kmalloc(count, GFP_KERNEL);
 	if (!kbuf)
 		return -ENOMEM;
@@ -514,12 +242,7 @@ static ssize_t dma_spi_write(struct file *filp, const char __user *buf,
 	return ret;
 }
 
-/*
- * read — read data from the SPI peripheral via DMA
- *
- * Sends all-zero bytes (or dummy bytes) to generate the SPI clock,
- * while DMA receives data from MISO simultaneously.
- */
+/* read(): send dummy bytes to clock out MISO data */
 static ssize_t dma_spi_read(struct file *filp, char __user *buf,
 			    size_t count, loff_t *off)
 {
@@ -537,7 +260,6 @@ static ssize_t dma_spi_read(struct file *filp, char __user *buf,
 		return -ENOMEM;
 
 	mutex_lock(&dev->lock);
-	/* Send dummy data, receive actual data */
 	ret = dma_spi_transfer(dev, NULL, kbuf, count);
 	mutex_unlock(&dev->lock);
 
@@ -601,16 +323,11 @@ static struct file_operations dma_spi_fops = {
 	.unlocked_ioctl = dma_spi_ioctl,
 };
 
-/* ======================== sysfs ======================== */
-
 static inline struct dma_spi_data *to_dma_spi(struct device *dev)
 {
 	return dev_get_drvdata(dev);
 }
 
-/*
- * transfers — total number of transfers (read-only)
- */
 static ssize_t transfers_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
@@ -619,9 +336,6 @@ static ssize_t transfers_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(transfers);
 
-/*
- * bytes — total bytes transferred (read-only)
- */
 static ssize_t bytes_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
@@ -630,9 +344,6 @@ static ssize_t bytes_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(bytes);
 
-/*
- * errors — number of DMA errors (read-only)
- */
 static ssize_t errors_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
@@ -641,9 +352,6 @@ static ssize_t errors_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(errors);
 
-/*
- * avg_time — average transfer time (μs) (read-only)
- */
 static ssize_t avg_time_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
 {
@@ -652,9 +360,6 @@ static ssize_t avg_time_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(avg_time);
 
-/*
- * speed — SPI clock frequency (read/write)
- */
 static ssize_t speed_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
@@ -692,27 +397,6 @@ static struct attribute *dma_spi_sysfs_attrs[] = {
 };
 ATTRIBUTE_GROUPS(dma_spi_sysfs);
 
-/* ======================== probe / remove ======================== */
-
-/*
- * dma_spi_probe — device initialization
- *
- * Two ways to request a DMA channel:
- *
- * Method 1: Device tree (recommended)
- *   Define dmas and dma-names properties in the device tree:
- *     dmas = <&dmac 0>, <&dmac 1>;
- *     dma-names = "tx", "rx";
- *   In the driver:
- *     dma_request_chan(dev, "tx") → TX channel
- *     dma_request_chan(dev, "rx") → RX channel
- *
- * Method 2: Manual specification (not recommended, for legacy kernels)
- *   dma_request_slave_channel(dev, "tx")
- *
- * Return value: 0 success, negative = error
- *   -EPROBE_DEFER: DMA controller not yet initialized; kernel will retry later
- */
 static int dma_spi_probe(struct spi_device *spi)
 {
 	int ret;
@@ -731,16 +415,6 @@ static int dma_spi_probe(struct spi_device *spi)
 	init_completion(&dev->tx_done);
 	init_completion(&dev->rx_done);
 
-	/*
-	 * Step 1: Request DMA channel
-	 *
-	 * dma_request_chan — get a DMA channel from the device tree
-	 *
-	 * Channel names "tx" and "rx" correspond to the dma-names property in the device tree.
-	 *
-	 * Note: If it returns -EPROBE_DEFER, you must return this value;
-	 *       the kernel will re-invoke probe after the DMA controller is ready.
-	 */
 	dev->tx_chan = dma_request_chan(parent, "tx");
 	if (IS_ERR(dev->tx_chan)) {
 		ret = PTR_ERR(dev->tx_chan);
@@ -757,29 +431,6 @@ static int dma_spi_probe(struct spi_device *spi)
 		goto err_free_tx;
 	}
 
-	/*
-	 * Step 2: Allocate coherent DMA buffer
-	 *
-	 * dma_alloc_coherent — allocate memory directly accessible by both CPU and DMA
-	 *
-	 * Parameters:
-	 *   parent          — device pointer
-	 *   DMA_SPI_BUF_SIZE — buffer size
-	 *   &dev->tx_dma    — output: DMA address
-	 *   GFP_KERNEL      — memory allocation flags
-	 *
-	 * Return value: CPU virtual address (NULL = failure)
-	 *
-	 * Coherent mapping characteristics:
-	 *   - No need for manual dma_map/dma_unmap
-	 *   - CPU writes are immediately visible to DMA (and vice versa)
-	 *   - But allocation cost is high; not suitable for frequent alloc/free
-	 *   - Usually used for long-lived buffers
-	 *
-	 * Contrast: If the data comes from user space (a temporary buffer after
-	 *           copy_from_user), you should use dma_map_single streaming mapping
-	 *           instead of copying into a coherent buffer.
-	 */
 	dev->tx_buf = dma_alloc_coherent(parent, DMA_SPI_BUF_SIZE,
 					  &dev->tx_dma, GFP_KERNEL);
 	if (!dev->tx_buf) {
@@ -796,9 +447,6 @@ static int dma_spi_probe(struct spi_device *spi)
 		goto err_free_tx_buf;
 	}
 
-	/*
-	 * Step 3: Register character device
-	 */
 	ret = alloc_chrdev_region(&dev->devid, 0, 1, DMA_SPI_DEV_NAME);
 	if (ret) {
 		dev_err(parent, "alloc_chrdev_region failed: %d\n", ret);
@@ -851,13 +499,6 @@ err_free_tx:
 	return ret;
 }
 
-/*
- * dma_spi_remove — device removal
- *
- * Cleanup order must be the reverse of allocation order in probe (LIFO):
- *   device_destroy → class_destroy → cdev_del → unregister_chrdev_region
- *   → dma_free_coherent → dma_release_channel
- */
 static int dma_spi_remove(struct spi_device *spi)
 {
 	struct dma_spi_data *dev = spi_get_drvdata(spi);
@@ -865,7 +506,6 @@ static int dma_spi_remove(struct spi_device *spi)
 	if (!dev)
 		return 0;
 
-	/* Terminate any in-progress DMA transfers */
 	if (dev->tx_chan)
 		dmaengine_terminate_sync(dev->tx_chan);
 	if (dev->rx_chan)
@@ -900,14 +540,6 @@ static const struct spi_device_id dma_spi_id[] = {
 };
 MODULE_DEVICE_TABLE(spi, dma_spi_id);
 
-/*
- * spi_driver — SPI device driver entry
- *
- * Differences from platform_driver:
- *   - spi_driver is specifically for devices on the SPI bus
- *   - The kernel handles SPI device registration and matching automatically
- *   - The probe parameter is struct spi_device * instead of platform_device *
- */
 static struct spi_driver dma_spi_driver = {
 	.driver = {
 		.name           = "dma_spi",

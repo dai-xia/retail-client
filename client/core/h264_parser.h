@@ -11,30 +11,7 @@ extern "C" {
 /**
  * @file h264_parser.h
  * @brief H264 Annex-B bitstream parser
- *
- * Features:
- *   - Extract NALU units from H264 raw bitstream
- *   - Parse SPS (Sequence Parameter Set) / PPS (Picture Parameter Set)
- *   - Identify frame types (I/P/B/IDR)
- *   - Collect bitstream statistics (frame count / bitrate / resolution / GOP structure)
- *
- * Notes:
- *   - H264 bitstream structure: SPS -> PPS -> IDR -> P -> P -> ... -> IDR
- *   - NALU start code: 0x00 00 00 01 (4 bytes) or 0x00 00 01 (3 bytes)
- *   - NALU type: forbidden_zero_bit(1) + nal_ref_idc(2) + nal_unit_type(5)
- *   - IDR frame: special form of I-frame; decoder can start independent decoding from IDR, clearing reference frame buffer
- *   - I-frame: intra-coded, does not depend on other frames, but does not clear reference frame buffer
- *   - P-frame: forward prediction, depends on preceding I/P frames
- *   - B-frame: bidirectional prediction, depends on preceding and following I/P frames, causes DTS != PTS
- *
- * PTS/DTS relationship:
- *   - DTS (Decoding Time Stamp): order in which the decoder processes frames; B-frames require decoding subsequent reference frames first
- *   - PTS (Presentation Time Stamp): order in which frames should be displayed
- *   - No B-frames: DTS == PTS (your project uses VPU encoder which by default does not produce B-frames)
- *   - With B-frames: DTS < PTS, reordering buffer required
  */
-
-/* ========== NALU type definitions (ITU-T H.264 Table 7-1) ========== */
 
 #define H264_NALU_TYPE_SLICE        1   /**< Coded slice of non-IDR picture (P/B frame) */
 #define H264_NALU_TYPE_SLICE_A      2   /**< Coded slice A (partitioned) */
@@ -49,8 +26,6 @@ extern "C" {
 #define H264_NALU_TYPE_EOSTREAM    11   /**< End of stream */
 #define H264_NALU_TYPE_FILL        12   /**< Filler data */
 
-/* ========== Frame type identifiers ========== */
-
 typedef enum {
     H264_FRAME_UNKNOWN = 0,
     H264_FRAME_I       = 1,    /**< I-frame: intra-coded, does not depend on other frames */
@@ -61,8 +36,6 @@ typedef enum {
     H264_FRAME_PPS     = 6,    /**< PPS parameter set (non-picture frame) */
     H264_FRAME_SEI     = 7,    /**< SEI supplemental information (non-picture frame) */
 } h264_frame_type_t;
-
-/* ========== SPS parse result ========== */
 
 typedef struct {
     int     profile_idc;        /**< Profile: 66=Baseline, 77=Main, 100=High */
@@ -89,8 +62,6 @@ typedef struct {
     int     height;             /**< Decoded picture height (pixels) */
 } h264_sps_t;
 
-/* ========== PPS parse result ========== */
-
 typedef struct {
     int     pic_parameter_set_id;
     int     seq_parameter_set_id;
@@ -109,8 +80,6 @@ typedef struct {
     int     redundant_pic_cnt_present_flag;
 } h264_pps_t;
 
-/* ========== NALU descriptor (single NALU unit info) ========== */
-
 typedef struct {
     int             nalu_type;      /**< NALU type (H264_NALU_TYPE_*) */
     int             nal_ref_idc;    /**< Reference priority (0-3, 3=highest) */
@@ -119,8 +88,6 @@ typedef struct {
     int             size;           /**< NALU data length (without start code) */
     int64_t         pts;            /**< Time stamp (filled by caller) */
 } h264_nalu_t;
-
-/* ========== Bitstream statistics ========== */
 
 typedef struct {
     int64_t total_bytes;            /**< Total bitstream bytes */
@@ -148,82 +115,47 @@ typedef struct {
     int64_t last_pts;               /**< Last frame PTS */
 } h264_stats_t;
 
-/* ========== Parser context ========== */
-
 typedef struct h264_parser_ctx h264_parser_t;
 
 /**
  * @brief NALU callback function type
- * @param nalu  Parsed NALU info
- * @param user_data User-defined data
  */
 typedef void (*h264_nalu_cb)(const h264_nalu_t *nalu, void *user_data);
 
-/**
- * @brief Create H264 parser
- * @return Parser context, NULL=failed
- */
+/** @brief Create H264 parser */
 h264_parser_t* h264_parser_create(void);
 
-/**
- * @brief Destroy H264 parser
- */
+/** @brief Destroy H264 parser */
 void h264_parser_destroy(h264_parser_t **ctx);
 
-/**
- * @brief Set NALU callback (optional; called for each parsed NALU)
- */
+/** @brief Set NALU callback (called per NALU) */
 void h264_parser_set_callback(h264_parser_t *ctx, h264_nalu_cb cb, void *user_data);
 
 /**
- * @brief Feed H264 Annex-B bitstream data, parse NALU by NALU
- *
- * Supports two start code formats:
- *   - 4 bytes: 0x00 0x00 0x00 0x01
- *   - 3 bytes: 0x00 0x00 0x01
- *
- * @param ctx  Parser context
- * @param data H264 raw stream data (Annex-B format)
- * @param size Number of data bytes
- * @return Number of parsed NALUs, <0=error
+ * @brief Feed H264 Annex-B data, parse NALU by NALU
+ * @return number of parsed NALUs, <0=error
  */
 int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size);
 
-/**
- * @brief Get most recently parsed SPS info
- * @return SPS pointer (internal buffer, no need to free), NULL=no SPS parsed
- */
+/** @brief Get most recent SPS (internal buffer), NULL if none */
 const h264_sps_t* h264_parser_get_sps(const h264_parser_t *ctx);
 
-/**
- * @brief Get most recently parsed PPS info
- * @return PPS pointer (internal buffer, no need to free), NULL=no PPS parsed
- */
+/** @brief Get most recent PPS (internal buffer), NULL if none */
 const h264_pps_t* h264_parser_get_pps(const h264_parser_t *ctx);
 
-/**
- * @brief Get bitstream statistics
- */
+/** @brief Get bitstream statistics */
 void h264_parser_get_stats(const h264_parser_t *ctx, h264_stats_t *out_stats);
 
-/**
- * @brief Reset statistics counters (does not clear SPS/PPS)
- */
+/** @brief Reset stats counters (keeps SPS/PPS) */
 void h264_parser_reset_stats(h264_parser_t *ctx);
 
-/**
- * @brief Convert NALU type to string description
- */
+/** @brief NALU type -> string */
 const char* h264_nalu_type_str(int nalu_type);
 
-/**
- * @brief Convert frame type to string description
- */
+/** @brief Frame type -> string */
 const char* h264_frame_type_str(h264_frame_type_t type);
 
-/**
- * @brief Print bitstream statistics summary to log (INFO level)
- */
+/** @brief Print statistics summary */
 void h264_parser_print_stats(const h264_stats_t *stats);
 
 #ifdef __cplusplus

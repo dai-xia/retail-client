@@ -1,16 +1,6 @@
 /**
  * @file audio_encoder.c
  * @brief FFmpeg AAC audio encoder wrapper (S16->FLTP->AAC)
- *
- * Symmetrical with video_encoder.c, wraps AAC encoder + SwrContext resampler:
- *   Input: S16LE interleaved PCM (ALSA capture format)
- *   Output: AAC AVPacket
- *
- * Encoding flow:
- *   1. audio_encoder_open()  - find AAC encoder, configure params, initialize SwrContext
- *   2. audio_encoder_encode_pcm() - swr convert -> fill frame -> send_frame -> receive_packet
- *   3. audio_encoder_flush() - send NULL frame -> drain remaining packets
- *   4. audio_encoder_close() - release all resources
  */
 
 #include "audio_encoder.h"
@@ -24,16 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * @brief Create and initialize audio encoder (AAC + SwrContext)
- *
- * Steps:
- *   1. Find AAC encoder
- *   2. Allocate AVCodecContext, configure sample rate/channels/bit rate/FLTP format
- *   3. avcodec_open2 opens the encoder
- *   4. Initialize SwrContext: S16 interleaved -> FLTP planar
- *   5. Allocate AVFrame + AVPacket
- */
 audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
 {
     if (!config) return NULL;
@@ -45,7 +25,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
     ctx->channels    = config->channels;
     ctx->opened      = false;
 
-    /* 1. Find AAC encoder */
     const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (!codec) {
         fprintf(stderr, "[AudioEncoder] AAC encoder not available\n");
@@ -53,7 +32,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
         return NULL;
     }
 
-    /* 2. Allocate encoder context */
     ctx->codec_ctx = avcodec_alloc_context3(codec);
     if (!ctx->codec_ctx) {
         fprintf(stderr, "[AudioEncoder] avcodec_alloc_context3 failed\n");
@@ -61,7 +39,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
         return NULL;
     }
 
-    /* 3. Configure AAC encoding parameters */
     ctx->codec_ctx->bit_rate       = config->bit_rate > 0 ? config->bit_rate : 64000;
     ctx->codec_ctx->sample_rate    = config->sample_rate;
     ctx->codec_ctx->channels       = config->channels;
@@ -71,7 +48,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
     ctx->codec_ctx->sample_fmt     = AV_SAMPLE_FMT_FLTP;
     ctx->codec_ctx->time_base      = (AVRational){1, config->sample_rate};
 
-    /* Some AAC encoders only support specific sample rates, auto-adapt */
     if (codec->supported_samplerates) {
         int found = 0;
         for (int i = 0; codec->supported_samplerates[i]; i++) {
@@ -87,7 +63,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
         }
     }
 
-    /* 4. Open encoder */
     int ret = avcodec_open2(ctx->codec_ctx, codec, NULL);
     if (ret < 0) {
         fprintf(stderr, "[AudioEncoder] avcodec_open2 failed\n");
@@ -96,7 +71,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
         return NULL;
     }
 
-    /* 5. Initialize resampler: S16 interleaved -> FLTP planar */
     ctx->swr_ctx = swr_alloc_set_opts(NULL,
         ctx->codec_ctx->channel_layout,
         ctx->codec_ctx->sample_fmt,
@@ -112,7 +86,6 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
         fprintf(stderr, "[AudioEncoder] swr_alloc_set_opts failed\n");
     }
 
-    /* 6. Allocate frame and packet */
     ctx->frame = av_frame_alloc();
     ctx->pkt   = av_packet_alloc();
     if (!ctx->frame || !ctx->pkt) {
@@ -128,13 +101,7 @@ audio_encoder_t *audio_encoder_open(const audio_encoder_config_t *config)
     return ctx;
 }
 
-/**
- * @brief Encode a chunk of PCM data -> AAC
- *
- * Data flow: S16LE PCM -> swr_convert(FLTP) -> AVFrame -> avcodec_send_frame -> avcodec_receive_packet
- *
- * @param pts PTS of input frame, based on codec_ctx->time_base (1/sample_rate)
- */
+/** @brief Encode PCM -> AAC. pts is in codec time_base (1/sample_rate). */
 int audio_encoder_encode_pcm(audio_encoder_t *ctx,
                               const uint8_t *pcm_data, int data_size,
                               int64_t pts,
@@ -144,7 +111,6 @@ int audio_encoder_encode_pcm(audio_encoder_t *ctx,
 
     int nb_samples = data_size / (ctx->channels * 2);  /* S16 = 2 bytes/sample */
 
-    /* 1. S16 -> FLTP resample */
     uint8_t *dst_data = NULL;
     int dst_linesize = 0;
     int ret = av_samples_alloc(&dst_data, &dst_linesize,
@@ -158,7 +124,6 @@ int audio_encoder_encode_pcm(audio_encoder_t *ctx,
                                   src_data, nb_samples);
     }
 
-    /* 2. Fill AVFrame */
     av_frame_unref(ctx->frame);
     ctx->frame->nb_samples     = nb_samples;
     ctx->frame->format         = ctx->codec_ctx->sample_fmt;
@@ -173,7 +138,6 @@ int audio_encoder_encode_pcm(audio_encoder_t *ctx,
         return -1;
     }
 
-    /* Copy resampled FLTP data to frame */
     if (ctx->codec_ctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
         memcpy(ctx->frame->data[0], dst_data, nb_samples * sizeof(float));
     } else {
@@ -181,11 +145,9 @@ int audio_encoder_encode_pcm(audio_encoder_t *ctx,
     }
     av_freep(&dst_data);
 
-    /* 3. Send frame to encoder */
     ret = avcodec_send_frame(ctx->codec_ctx, ctx->frame);
     if (ret < 0) return -1;
 
-    /* 4. Get encoded packet */
     ret = avcodec_receive_packet(ctx->codec_ctx, ctx->pkt);
     if (ret == 0) {
         *out_pkt = ctx->pkt;

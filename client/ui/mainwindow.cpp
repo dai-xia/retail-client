@@ -364,7 +364,6 @@ void MainWindow::connectServices()
         ClientService::getInstance()->requestOtaFile(version, filename);
     });
 
-    /* Monitor commands: sent from server -> executed by FaceManager */
     connect(cs, &ClientService::signalMonitorStart,
             m_faceManager, &FaceManager::startMonitor);
     connect(cs, &ClientService::signalMonitorStop,
@@ -573,7 +572,6 @@ void MainWindow::connectSignals()
 
     connect(m_settlementWidget, &SettlementWidget::signalStockChanged,
             m_goodsManager, &GoodsManager::refreshGoodsTable);
-    // Auto-refresh the goods list on the shopping page after a successful purchase
     connect(m_settlementWidget, &SettlementWidget::signalStockChanged,
             m_settlementWidget, &SettlementWidget::refreshGoodsTable);
 }

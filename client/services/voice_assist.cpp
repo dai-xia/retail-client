@@ -65,7 +65,6 @@ bool VoiceAssist::init(const QString &modelPath)
         return false;
     }
 
-    /* Initialize native ALSA capture */
     if (!initAlsaCapture()) {
         qWarning() << "[VoiceAssist] ALSA audio capture initialization failed";
         return false;
@@ -74,7 +73,6 @@ bool VoiceAssist::init(const QString &modelPath)
 
     m_available = true;
 
-    /* Try to initialize audio preprocessing (NS+AGC+VAD) */
     if (initAudioPreproc()) {
         qDebug() << "[VoiceAssist] Audio preprocessing: NS+AGC+VAD enabled";
     } else {
@@ -85,53 +83,33 @@ bool VoiceAssist::init(const QString &modelPath)
     return true;
 }
 
-/**
- * @brief Initialize the audio preprocessing pipeline (NS+AGC+VAD)
- *
- * Pipeline: NS (denoise) -> AGC (auto gain) -> VAD (endpoint detection)
- * - NS: remove ambient noise (SpeexDSP speex_preprocess_state_run)
- * - AGC: automatically adjust volume so Vosk input is more stable
- * - VAD: detect speech/silence, only send speech frames to Vosk to reduce wasted inference
- *
- * AEC (echo cancellation) is disabled by default; it requires a far-end reference signal
- * (speaker playback) and is more suited to voice-call scenarios, which the retail scenario does not need.
- */
+/* NS -> AGC -> VAD; AEC disabled (no far-end reference in retail) */
 bool VoiceAssist::initAudioPreproc()
 {
     audio_preproc_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.sample_rate   = 16000;
     cfg.channels      = 1;
-    cfg.frame_size    = 480;     /* 30ms @ 16kHz, standard SpeexDSP frame length */
-    cfg.enable_aec    = false;   /* No echo cancellation needed in the retail scenario */
-    cfg.enable_ns     = true;    /* Denoise: remove ambient noise */
-    cfg.enable_agc    = true;    /* Auto gain: compensate for speaking volume */
-    cfg.enable_vad    = true;    /* VAD: detect speech endpoints */
-    cfg.vad_threshold = 0.5f;    /* VAD threshold, 0.5 is the recommended default */
-    cfg.vad_rknn_path = nullptr; /* Use the built-in SpeexDSP VAD, no RKNN model dependency */
+    cfg.frame_size    = 480;     /* 30ms @ 16kHz */
+    cfg.enable_aec    = false;   /* no far-end reference needed */
+    cfg.enable_ns     = true;
+    cfg.enable_agc    = true;
+    cfg.enable_vad    = true;
+    cfg.vad_threshold = 0.5f;
+    cfg.vad_rknn_path = nullptr; /* built-in SpeexDSP VAD */
 
     m_preprocCtx = audio_preproc_create(&cfg);
     return m_preprocCtx != nullptr;
 }
 
-/**
- * @brief Initialize native ALSA audio capture
- *
- * Parameter settings:
- *   - Sample rate: 16000 Hz (standard Vosk input)
- *   - Format: S16_LE (16-bit signed little-endian)
- *   - Channels: 1 (mono, to reduce data volume on embedded devices)
- *   - Period: 1024 frames -> 64 ms latency -> 64 ms timer interval
- */
+/* 16 kHz S16_LE mono; 1024 frames/period -> 64 ms timer */
 bool VoiceAssist::initAlsaCapture()
 {
     m_alsaCtx = alsa_capture_open("default", 16000, 1, 1024);
     if (!m_alsaCtx) {
-        /* plughw: the plug plugin performs automatic resampling/format/channel conversion,
-         * guaranteeing 16 kHz S16_LE mono output.
-         * Do not use hw:0,0: hw direct mode has no conversion, and the sample rate gets
-         * rewritten by set_rate_near to the hardware native value (e.g. 48 kHz),
-         * which contradicts Vosk's 16 kHz requirement and causes recognition errors. */
+        /* plughw auto-converts to 16 kHz S16_LE mono. Do not use hw:0,0:
+         * set_rate_near rewrites to the hardware native rate (e.g. 48 kHz),
+         * breaking Vosk's 16 kHz requirement. */
         m_alsaCtx = alsa_capture_open("plughw:0,0", 16000, 1, 1024);
     }
 
@@ -140,7 +118,6 @@ bool VoiceAssist::initAlsaCapture()
         return false;
     }
 
-    /* Create a timer to read audio data periodically based on the period */
     m_alsaReadTimer = new QTimer(this);
     /* period_size=1024, rate=16000 -> 64 ms/period */
     unsigned int rate = alsa_capture_get_rate(m_alsaCtx);
@@ -163,12 +140,9 @@ void VoiceAssist::startListening()
     }
     if (m_listening.load()) return;
 
-    /* === Audio device conflict avoidance: pause the streaming audio track and take exclusive control of the mic ===
-     * The streaming thread's audioThreadFunc detects m_audioPaused=true and closes the ALSA device.
-     * We must wait until the device is actually released (up to 200 ms), otherwise ALSA reads from this thread may conflict. */
+    /* Pause streaming audio so it releases the ALSA device before we take the mic */
     FaceManager::getInstance()->pauseAudioStream();
 
-    /* Wait for the streaming audio thread to release the ALSA device (detect isAudioStreaming becoming false) */
     {
         int waitMs = 0;
         while (FaceManager::getInstance()->isAudioStreaming() && waitMs < 300) {
@@ -203,20 +177,16 @@ void VoiceAssist::stopListening()
 
     stopAlsaListening();
 
-    /* === Audio device conflict avoidance: resume the streaming audio track ===
-     * Voice recognition finished; wake the streaming thread's audioThreadFunc to keep capturing audio. */
+    /* Resume the streaming audio track */
     FaceManager::getInstance()->resumeAudioStream();
 
     qDebug() << "[VoiceAssist] Stop listening";
 }
 
-/* ======================== ALSA capture path ======================== */
-
 void VoiceAssist::startAlsaListening()
 {
     if (m_alsaCtx) {
-        /* Re-prepare the ALSA device: after drop, DMA has stopped; prepare restarts DMA transfer.
-         * Without this step, the first snd_pcm_readi may return -EPIPE (overrun). */
+        /* Re-prepare after drop: prepare restarts DMA, otherwise first read returns -EPIPE */
         if (alsa_capture_prepare(m_alsaCtx) < 0) {
             qWarning() << "[VoiceAssist] ALSA prepare failed, capture may be abnormal";
         }
@@ -232,23 +202,15 @@ void VoiceAssist::stopAlsaListening()
         m_alsaReadTimer->stop();
     }
     if (m_alsaCtx) {
-        /* Stop DMA transfer and discard leftover data in the buffer.
-         * Without this step, after the timer stops no one reads; the ALSA buffer fills up -> overrun (XRUN),
-         * and on the next startListening snd_pcm_readi returns -EPIPE, losing the first frame. */
+        /* Stop DMA and discard buffered data; otherwise buffer overruns and next read returns -EPIPE */
         alsa_capture_drop(m_alsaCtx);
     }
 }
 
-/**
- * @brief ALSA timed-read callback, periodically reads PCM data from the ALSA buffer
- *
- * Data flow: ALSA kernel buffer -> snd_pcm_readi() -> application -> Vosk
- */
 void VoiceAssist::onAlsaReadTimeout()
 {
     if (!m_listening.load() || !m_recognizer || !m_alsaCtx) return;
 
-    /* Read one period of PCM data */
     const int frames = 1024;  /* period_size */
     char buffer[4096];  /* 1024 frames * 1 channel * 2 bytes = 2048, 4096 is enough */
 
@@ -260,14 +222,7 @@ void VoiceAssist::onAlsaReadTimeout()
     }
 }
 
-/* ======================== Common audio processing ======================== */
-
-/**
- * @brief Check the Vosk full recognition result
- *
- * Called when vosk_recognizer_accept_waveform returns 1,
- * indicating that a complete sentence was recognized.
- */
+/* Final result is ready when accept_waveform returns 1 */
 void VoiceAssist::checkVoskResult()
 {
     if (!m_recognizer) return;
@@ -289,31 +244,22 @@ void VoiceAssist::checkVoskResult()
     vosk_recognizer_reset(m_recognizer);
 }
 
-/**
- * @brief Common audio data handler, feeds PCM data into the Vosk recognizer
- * @param data PCM audio data pointer (S16_LE, 16 kHz, mono)
- * @param size Data size in bytes
- *
- * Audio processing chain:
- *   Raw PCM -> audio_preproc (NS+AGC+VAD) -> speech frames -> Vosk
- */
+/* Feed PCM (S16_LE, 16 kHz, mono) through NS+AGC+VAD into Vosk */
 void VoiceAssist::processAudioData(const char *data, int size)
 {
     if (!m_recognizer || !data || size <= 0) return;
 
-    /* Audio preprocessing: NS+AGC+VAD */
     if (m_preprocCtx) {
         const int frame_size = 480;  /* Same as in initAudioPreproc, 30 ms @ 16 kHz */
         const int frame_bytes = frame_size * (int)sizeof(int16_t);
         const int16_t *src = (const int16_t *)data;
-        int remaining = size / (int)sizeof(int16_t);  /* Number of samples */
+        int remaining = size / (int)sizeof(int16_t);
 
         while (remaining >= frame_size) {
             int16_t out_buf[480];
             audio_vad_result_t vad = audio_preproc_process(
                 m_preprocCtx, src, nullptr, out_buf);
 
-            /* VAD state-change notification */
             bool isSpeech = (vad == AUDIO_VAD_SPEECH);
             if (isSpeech != m_lastVadSpeech) {
                 m_lastVadSpeech = isSpeech;
@@ -333,7 +279,7 @@ void VoiceAssist::processAudioData(const char *data, int size)
             remaining -= frame_size;
         }
 
-        /* Leftover data smaller than one frame: feed directly to Vosk (no preprocessing, very small) */
+        /* Feed leftover (<1 frame) directly to Vosk */
         if (remaining > 0) {
             int ret = vosk_recognizer_accept_waveform(m_recognizer,
                 (const char *)src, remaining * (int)sizeof(int16_t));
@@ -342,14 +288,12 @@ void VoiceAssist::processAudioData(const char *data, int size)
             }
         }
     } else {
-        /* No preprocessing: feed raw data directly to Vosk */
         int ret = vosk_recognizer_accept_waveform(m_recognizer, data, size);
         if (ret > 0) {
             checkVoskResult();
         }
     }
 
-    /* Parse the real-time partial recognition result */
     const char *partialJson = vosk_recognizer_partial_result(m_recognizer);
     if (partialJson && strlen(partialJson) > 0) {
         cJSON *root = cJSON_Parse(partialJson);

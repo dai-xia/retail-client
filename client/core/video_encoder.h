@@ -44,27 +44,21 @@ typedef struct {
 
 /**
  * @brief Initialize the video encoder
- * @param config encoder config
  * @return encoder context, NULL on failure
- *
- * RK3568 HW encode:
- *   codec_name = "h264_rkmpp" (Rockchip MPP HW encode)
- *   zero-copy input (DMA_BUF), low power, low latency
- *   requires librockchip_mpp + librga
+ * @note codec_name="h264_rkmpp" uses VPU HW + DMA-BUF zero-copy (needs librockchip_mpp)
  */
 video_encoder_t *video_encoder_open(const video_encoder_config_t *config);
 
 /**
- * @brief Encode one NV12 frame (V4L2 native format direct, zero-copy)
- * @param pts  capture-time PTS (in encoder time_base), passed through to output packet
+ * @brief Encode one NV12 frame (V4L2 native format, zero-copy)
+ * @param pts capture-time PTS, passed through to output packet
  */
 int video_encoder_encode_nv12(video_encoder_t *ctx,
                                const uint8_t *nv12_data, int data_size,
                                int64_t pts, AVPacket **out_pkt);
 
 /**
- * @brief Encode one NV12 DMA-BUF (zero-copy: V4L2 fd -> VPU direct read)
- * @param fd  DMA-BUF fd (exported by VIDIOC_EXPBUF)
+ * @brief Encode one NV12 DMA-BUF fd (V4L2 fd -> VPU direct read, zero-copy)
  * @param pts capture-time PTS, passed through to output packet
  */
 int video_encoder_encode_nv12_fd(video_encoder_t *ctx,
@@ -72,14 +66,12 @@ int video_encoder_encode_nv12_fd(video_encoder_t *ctx,
                                   int64_t pts, AVPacket **out_pkt);
 
 /**
- * @brief Flush the encoder, drain remaining buffered B-frames
+ * @brief Drain remaining buffered frames
  * @return number of packets produced
  */
 int video_encoder_flush(video_encoder_t *ctx, AVPacket **out_pkts, int max_pkts);
 
-/**
- * @brief Close the encoder and release resources
- */
+/** @brief Close the encoder and release resources */
 void video_encoder_close(video_encoder_t **ctx);
 
 #ifdef __cplusplus

@@ -20,11 +20,6 @@ extern "C" {
 #define WATCHDOG_CRASH_WINDOW_SEC  300
 #define WATCHDOG_MAX_CRASH_COUNT   5
 
-// ==================== Watchdog core struct ====================
-/**
- * @brief Watchdog instance
- * Each program can create one watchdog instance holding all its state.
- */
 typedef struct {
     int timeout_sec;        // timeout threshold (s); reboot if not fed within this window
     int feed_interval;      // auto-feed interval (s)
@@ -37,8 +32,6 @@ typedef struct {
     pthread_mutex_t mtx;                    // protects cross-thread access
 } watchdog_t;
 
-
-// ==================== Public API ====================
 watchdog_t* watchdog_create(int timeout_sec, int feed_interval);
 void watchdog_destroy(watchdog_t *wd);
 int watchdog_start(watchdog_t *wd);

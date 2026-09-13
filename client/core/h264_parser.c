@@ -1,34 +1,6 @@
 /**
  * @file h264_parser.c
  * @brief H264 Annex-B bitstream parser implementation
- *
- * Core concepts:
- *
- * 1. H264 bitstream hierarchy:
- *    stream -> NALU sequence -> Slice -> Macroblock (MB) -> sub-macroblock
- *    Each NALU consists of start code + NALU Header (1 byte) + RBSP
- *
- * 2. NALU Header format (1 byte):
- *    forbidden_zero_bit (1bit) - must be 0; 1 indicates stream error
- *    nal_ref_idc        (2bit) - reference priority: 3=high (SPS/PPS/IDR), 0=non-reference
- *    nal_unit_type      (5bit) - NALU type, see H264_NALU_TYPE_*
- *
- * 3. SPS (Sequence Parameter Set): describes parameters of the entire video sequence
- *    - Resolution: pic_width_in_mbs_minus1, pic_height_in_map_units_minus1
- *    - Profile/Level: profile_idc, level_idc
- *    - GOP structure reference: max_num_ref_frames
- *
- * 4. PPS (Picture Parameter Set): describes picture-level coding parameters
- *    - Entropy coding mode: CAVLC(0) / CABAC(1)
- *    - Initial QP: pic_init_qp_minus26
- *
- * 5. IDR frame vs I-frame:
- *    - I-frame: intra-coded, does not depend on other frames, but does not clear reference frame buffer
- *    - IDR frame: special form of I-frame; decoder clears all reference frame buffers upon receiving IDR
- *      -> The next P-frame cannot reference frames before the IDR
- *      -> IDR is the GOP start boundary; independent decoding can start from any IDR
- *    -> This is why RTSP streaming must send SPS+PPS before each key frame
- *      (decoder may start decoding from any IDR, requires parameter sets)
  */
 
 #include "h264_parser.h"
@@ -36,17 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ========== Exp-Golomb decoder (foundation of H264 syntax elements) ==========
- *
- * H264 makes extensive use of Exp-Golomb coding. Decoding process:
- *   1. Count leading zeros leadingZeroBits
- *   2. Read 1 '1' bit
- *   3. Read leadingZeroBits bits as suffix
- *   4. Decoded value = 2^leadingZeroBits - 1 + suffix
- *
- * For example: 00100 -> leadingZeroBits=2, suffix=00
- *       value = 2^2 - 1 + 0 = 3
- */
+/* Exp-Golomb: leading zeros + suffix; value = 2^n - 1 + suffix */
 
 typedef struct {
     const uint8_t *data;    /**< Bitstream data pointer */
@@ -97,14 +59,14 @@ static uint32_t bs_read_ue(bitstream_t *bs)
     int leading_zeros = 0;
     while (!bs_eof(bs) && bs_read_bit(bs) == 0) {
         leading_zeros++;
-        if (leading_zeros > 32) return 0; /* Guard against malformed stream */
+        if (leading_zeros > 32) return 0;
     }
     if (leading_zeros == 0) return 0;
     uint32_t suffix = bs_read_bits(bs, leading_zeros);
     return (1U << leading_zeros) - 1 + suffix;
 }
 
-/* Signed Exp-Golomb coding se(v) = (-1)^(k+1) * ceil(k/2) */
+/* Signed Exp-Golomb se(v) = (-1)^(k+1) * ceil(k/2) */
 static int32_t bs_read_se(bitstream_t *bs)
 {
     uint32_t k = bs_read_ue(bs);
@@ -114,26 +76,6 @@ static int32_t bs_read_se(bitstream_t *bs)
         return (int32_t)((k + 1) / 2);
 }
 
-/* ========== SPS parsing ==========
- *
- * SPS structure (simplified; key fields of Baseline/Main/High):
- *   profile_idc                         u(8)
- *   constraint_set0-3_flag              u(1) x 4
- *   reserved_zero_4bits                 u(4)
- *   level_idc                           u(8)
- *   seq_parameter_set_id                ue(v)
- *   [High profile extra fields]
- *   chroma_format_idc                   ue(v)
- *   ...
- *   pic_width_in_mbs_minus1             ue(v)
- *   pic_height_in_map_units_minus1      ue(v)
- *   frame_mbs_only_flag                 u(1)
- *   ...
- *   frame_cropping_flag                 u(1)
- *   ...
- *   vui_parameters_present_flag         u(1)
- */
-
 static int parse_sps(const uint8_t *data, int size, h264_sps_t *sps)
 {
     bitstream_t bs;
@@ -142,13 +84,11 @@ static int parse_sps(const uint8_t *data, int size, h264_sps_t *sps)
     memset(sps, 0, sizeof(*sps));
 
     sps->profile_idc = bs_read_bits(&bs, 8);
-    /* constraint_set0-3_flag + reserved */
     bs_read_bits(&bs, 4);  /* constraint_set0-3_flag */
     bs_read_bits(&bs, 4);  /* reserved_zero_4bits */
     sps->level_idc = bs_read_bits(&bs, 8);
     sps->seq_parameter_set_id = bs_read_ue(&bs);
 
-    /* High Profile (100) and some other profiles have extra fields */
     if (sps->profile_idc == 100 || sps->profile_idc == 110 ||
         sps->profile_idc == 122 || sps->profile_idc == 244 ||
         sps->profile_idc == 44  || sps->profile_idc == 83  ||
@@ -218,16 +158,10 @@ static int parse_sps(const uint8_t *data, int size, h264_sps_t *sps)
 
     sps->vui_parameters_present_flag = bs_read_bit(&bs);
 
-    /* Compute actual resolution
-     * Width  = (pic_width_in_mbs_minus1 + 1) * 16  (each macroblock is 16x16 pixels)
-     * Height = (pic_height_in_map_units_minus1 + 1) * 16 * (2 - frame_mbs_only_flag)
-     *          frame_mbs_only_flag=1: progressive scan, height = macroblocks * 16
-     *          frame_mbs_only_flag=0: interlaced scan, each map_unit = 2 macroblocks (fields), height = macroblocks * 32
-     */
+    /* Width = (pic_width_in_mbs_minus1+1)*16; Height adds *2 if interlaced */
     sps->width  = (sps->pic_width_in_mbs_minus1 + 1) * 16;
     sps->height = (sps->pic_height_in_map_units_minus1 + 1) * 16 * (2 - sps->frame_mbs_only_flag);
 
-    /* Subtract cropping region */
     if (sps->frame_cropping_flag) {
         int crop_x = (sps->frame_crop_left_offset + sps->frame_crop_right_offset) * 2;
         int crop_y = (sps->frame_crop_top_offset + sps->frame_crop_bottom_offset) * 2 *
@@ -238,8 +172,6 @@ static int parse_sps(const uint8_t *data, int size, h264_sps_t *sps)
 
     return 0;
 }
-
-/* ========== PPS parsing ========== */
 
 static int parse_pps(const uint8_t *data, int size, h264_pps_t *pps)
 {
@@ -255,7 +187,6 @@ static int parse_pps(const uint8_t *data, int size, h264_pps_t *pps)
     pps->num_slice_groups_minus1 = bs_read_ue(&bs);
 
     if (pps->num_slice_groups_minus1 > 0) {
-        /* Simplified: skip slice group related fields */
         int slice_group_map_type = bs_read_ue(&bs);
         if (slice_group_map_type == 0) {
             for (int i = 0; i <= pps->num_slice_groups_minus1; i++)
@@ -264,7 +195,6 @@ static int parse_pps(const uint8_t *data, int size, h264_pps_t *pps)
             for (int i = 0; i < pps->num_slice_groups_minus1; i++)
                 bs_read_ue(&bs);
         }
-        /* Other types simplified-skipped */
     }
 
     pps->num_ref_idx_l0_default_active_minus1 = bs_read_ue(&bs);
@@ -281,14 +211,6 @@ static int parse_pps(const uint8_t *data, int size, h264_pps_t *pps)
     return 0;
 }
 
-/* ========== Slice Header frame type detection ==========
- *
- * Slice Header structure (simplified):
- *   first_mb_in_slice       ue(v) - slice starting macroblock address
- *   slice_type              ue(v) - slice type: 0=P, 1=B, 2=I, 3=SP, 4=SI
- *                                     5=P, 6=B, 7=I, 8=SP, 9=SI (+5 means same type)
- */
-
 static h264_frame_type_t detect_frame_type(const uint8_t *data, int size, int nalu_type)
 {
     if (nalu_type == H264_NALU_TYPE_IDR) return H264_FRAME_IDR;
@@ -303,7 +225,6 @@ static h264_frame_type_t detect_frame_type(const uint8_t *data, int size, int na
         return H264_FRAME_UNKNOWN;
     }
 
-    /* Parse slice_type */
     bitstream_t bs;
     if (bs_init(&bs, data, size) < 0) return H264_FRAME_UNKNOWN;
 
@@ -318,8 +239,6 @@ static h264_frame_type_t detect_frame_type(const uint8_t *data, int size, int na
         default: return H264_FRAME_UNKNOWN;
     }
 }
-
-/* ========== Parser context ========== */
 
 struct h264_parser_ctx {
     h264_sps_t    sps;            /**< Most recently parsed SPS */
@@ -359,22 +278,7 @@ void h264_parser_set_callback(h264_parser_t *ctx, h264_nalu_cb cb, void *user_da
     ctx->callback_data = user_data;
 }
 
-/* ========== Start code search ==========
- *
- * Annex-B start code:
- *   0x00 00 00 01 (4 bytes) - most common
- *   0x00 00 01    (3 bytes) - less common
- *
- * Emulation prevention bytes:
- *   H264 specifies that RBSP cannot contain 0x00 00 00/01/02/03,
- *   the encoder inserts 0x03 (emulation prevention byte) after 0x00 00,
- *   decoding must remove it: 0x00 00 03 00 -> 0x00 00 00
- *                            0x00 00 03 01 -> 0x00 00 01
- *                            0x00 00 03 02 -> 0x00 00 02
- *                            0x00 00 03 03 -> 0x00 00 03
- *
- * This parser handles emulation prevention bytes automatically when parsing SPS/PPS/Slice.
- */
+/* Annex-B start codes: 00 00 01 (3B) or 00 00 00 01 (4B) */
 
 static int find_start_code(const uint8_t *data, int size, int *sc_len)
 {
@@ -392,110 +296,49 @@ static int find_start_code(const uint8_t *data, int size, int *sc_len)
     }
     return -1;
 }
-/**
- * @brief H264 bitstream parser entry: splits NALU units from the stream and parses NAL type, statistics
- *
- * Function overview:
- * Receives a continuous H264 raw stream (AnnexB format with 0x0001/0x000001 start codes),
- * loops to find start codes and split independent NALUs; parses each NAL header to distinguish SPS/PPS/IDR/I/P/B/SEI etc.;
- * maintains global stream statistics (resolution, I/P/B frame counts, IDR interval GOP, byte sizes, etc.);
- * optionally triggers NALU callback so the upper layer can capture key frame, SPS, PPS events.
- *
- * Supported stream format: H264 AnnexB (with start code)
- * Cannot directly parse AVCC format (4-byte length prefix); must convert to AnnexB first.
- *
- * @param ctx        h264_parser_t* parser context handle
- *                   Stores SPS/PPS parameters, statistics, callback pointer; must be created/initialized before calling.
- * @param data       const uint8_t* input H264 raw stream buffer pointer
- * @param size       int valid byte length of input buffer
- *
- * @return
- *      >=0 : success, returns total NALUs parsed from this input
- *      -1  : invalid parameters (null pointer, size<=0)
- *
- * When to use:
- * Call before av_interleaved_write_frame (in your send_video_common code);
- * because av_interleaved_write_frame internally calls av_packet_unref, after which packet->data is invalid and the stream cannot be read.
- *
- * Typical uses:
- * 1. Real-time detection of SPS/PPS arrival, obtain video width/height;
- * 2. Detect IDR key frames, judge whether the stream can be pulled by the player;
- * 3. Count I/P/B frames, bitrate, GOP length, monitor encoding quality;
- * 4. Notify via callback: key frame arrival, parameter set arrival, etc.
- */
+/* Feed Annex-B data; returns NALU count parsed, -1 on invalid args. */
 int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
 {
-    /****************************************************************************
-     * Parameter validation
-     * Parser context and stream data must not be null, valid length must be >0; return -1 on invalid
-     ***************************************************************************/
     if (!ctx || !data || size <= 0) return -1;
 
-    int nalu_count = 0;    // Total NALUs parsed in this loop
-    int offset = 0;        // Offset of current data being traversed
+    int nalu_count = 0;
+    int offset = 0;
 
-    /****************************************************************************
-     * Loop through the buffer, splitting NALU units one by one
-     * H264 AnnexB uses [start code 0x0001 / 0x000001] to separate NALU boundaries
-     ***************************************************************************/
     while (offset < size) {
         int sc_len = 0;
-        // Find the first start code after the current position
-        // sc_pos: offset relative to data+offset; sc_len: start code length (3-byte 0001 / 4-byte 000001)
         int sc_pos = find_start_code(data + offset, size - offset, &sc_len);
 
-        /****************************************************************************
-         * sc_pos < 0: no start code found
-         * Remaining data insufficient for a complete NALU; may be fragment, exit loop and wait for next batch
-         ***************************************************************************/
         if (sc_pos < 0) {
-            /* No start code found, remaining data less than one NALU */
             break;
         }
 
-        /****************************************************************************
-         * Start code found, locate current NALU range
-         * nalu_start: NALU payload start address, after the start code
-         * nalu_end: defaults to buffer end, corrected by searching for the next start code
-         ***************************************************************************/
         int nalu_start = offset + sc_pos + sc_len;
         int nalu_end = size;
 
-        // Find the next start code to determine where the current NALU ends
         int next_sc_len = 0;
         int next_sc_pos = find_start_code(data + nalu_start, size - nalu_start, &next_sc_len);
         if (next_sc_pos >= 0) {
             nalu_end = nalu_start + next_sc_pos;
         }
 
-        // Compute current NALU payload length
         int nalu_size = nalu_end - nalu_start;
         if (nalu_size <= 0) {
-            // Empty NALU, skip; offset jumps to current NALU start to continue search
             offset = nalu_start;
             continue;
         }
 
         const uint8_t *nalu_data = data + nalu_start;
 
-        /****************************************************************************
-         * Parse NALU Header (the first byte of each H264 NALU is the header)
-         * bit7     : forbidden_zero_bit forbidden bit; 1 means stream corruption
-         * bit5~bit6: nal_ref_idc importance marker (non-zero for IDR/SPS/PPS)
-         * bit0~bit4: nalu_type NAL unit type, distinguishes SPS/PPS/IDR/Slice/SEI
-         ***************************************************************************/
         uint8_t nalu_header = nalu_data[0];
         int forbidden_zero_bit = (nalu_header >> 7) & 1;
         int nal_ref_idc        = (nalu_header >> 5) & 3;
         int nalu_type           = nalu_header & 0x1F;
 
         if (forbidden_zero_bit) {
-            /* Stream error, corrupted NALU, skip directly */
             offset = nalu_end;
             continue;
         }
 
-        // Fill NALU info struct for later parsing and callback
         h264_nalu_t nalu;
         memset(&nalu, 0, sizeof(nalu));
         nalu.nalu_type   = nalu_type;
@@ -503,27 +346,17 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
         nalu.data        = nalu_data;
         nalu.size        = nalu_size;
 
-        /****************************************************************************
-         * RBSP: NAL payload data after the 1-byte header
-         * SPS/PPS/Slice specific parameters all reside in the RBSP
-         ***************************************************************************/
         const uint8_t *rbsp_data = nalu_data + 1;
         int rbsp_size = nalu_size - 1;
 
-        // Global statistics accumulation: total NALUs, raw stream bytes (including start code length)
         ctx->stats.total_nalus++;
         ctx->stats.total_bytes += nalu_size + sc_len;
 
-        /****************************************************************************
-         * Branch handling by NAL type
-         ***************************************************************************/
         switch (nalu_type) {
         case H264_NALU_TYPE_SPS:
-            // Sequence Parameter Set: contains resolution, frame rate, profile and other core info
             if (parse_sps(rbsp_data, rbsp_size, &ctx->sps) == 0) {
                 ctx->sps_valid = 1;
                 ctx->stats.sps_count++;
-                // Extract picture width/height from SPS, save to stats
                 ctx->stats.width = ctx->sps.width;
                 ctx->stats.height = ctx->sps.height;
                 nalu.frame_type = H264_FRAME_SPS;
@@ -531,7 +364,6 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
             break;
 
         case H264_NALU_TYPE_PPS:
-            // Picture Parameter Set, used together with SPS for decoding
             if (parse_pps(rbsp_data, rbsp_size, &ctx->pps) == 0) {
                 ctx->pps_valid = 1;
                 ctx->stats.pps_count++;
@@ -540,12 +372,11 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
             break;
 
         case H264_NALU_TYPE_IDR:
-            // IDR key frame: instant decoder refresh, new GOP start; player can randomly access playback only after receiving IDR
             nalu.frame_type = H264_FRAME_IDR;
             ctx->stats.idr_count++;
             ctx->stats.idr_bytes += nalu_size;
 
-            /* Compute GOP size: number of frames between previous IDR and this IDR */
+            /* GOP size between IDRs */
             if (ctx->frames_since_idr > 0) {
                 int gop = ctx->frames_since_idr;
                 ctx->stats.gop_size = gop;
@@ -553,7 +384,6 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
                 if (ctx->stats.min_gop_size == 0 || gop < ctx->stats.min_gop_size)
                     ctx->stats.min_gop_size = gop;
             }
-            // Reset frame counter after IDR, start new GOP stats cycle
             ctx->frames_since_idr = 0;
             break;
 
@@ -561,11 +391,9 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
         case H264_NALU_TYPE_SLICE_A:
         case H264_NALU_TYPE_SLICE_B:
         case H264_NALU_TYPE_SLICE_C:
-            // Picture Slice data, contains I/P/B frames
             nalu.frame_type = detect_frame_type(rbsp_data, rbsp_size, nalu_type);
-            ctx->frames_since_idr++; // Increment frame count after IDR
+            ctx->frames_since_idr++;
 
-            // Count I/P/B frames and bytes separately
             switch (nalu.frame_type) {
             case H264_FRAME_I:
                 ctx->stats.i_count++;
@@ -584,7 +412,6 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
             break;
 
         case H264_NALU_TYPE_SEI:
-            // Supplemental Enhancement Information (timing info, custom data, etc.)
             nalu.frame_type = H264_FRAME_SEI;
             ctx->stats.sei_count++;
             break;
@@ -594,20 +421,14 @@ int h264_parser_feed(h264_parser_t *ctx, const uint8_t *data, int size)
             break;
         }
 
-        /****************************************************************************
-         * If a callback is registered, push current NALU info to upper layer
-         * Upper layer can use it to: detect key frames, print SPS info, trigger alerts, etc.
-         ***************************************************************************/
         if (ctx->callback) {
             ctx->callback(&nalu, ctx->callback_data);
         }
 
         nalu_count++;
-        // Offset moves to end of current NALU, continue searching for next start code
         offset = nalu_end;
     }
 
-    // Return total NAL units parsed this time
     return nalu_count;
 }
 
@@ -626,7 +447,6 @@ void h264_parser_get_stats(const h264_parser_t *ctx, h264_stats_t *out_stats)
     if (!ctx || !out_stats) return;
     *out_stats = ctx->stats;
 
-    /* Compute derived statistics */
     int total_frames = out_stats->idr_count + out_stats->i_count +
                        out_stats->p_count + out_stats->b_count;
     if (total_frames > 0) {

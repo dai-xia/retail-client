@@ -20,7 +20,6 @@ int main(int argc, char *argv[])
     QString dumpDir = "/var/log/retail/dump";
     QDir().mkpath(dumpDir);
 
-    /* Initialize logging system first so all subsequent flows have logs */
     QString logDir = "/var/log/retail";
     QDir().mkpath(logDir);
     logger_t *log = logger_create(logDir.toUtf8().constData(), "client");
@@ -31,22 +30,16 @@ int main(int argc, char *argv[])
         logger_start(log);
     }
 
-    /* Phase 1: OTA boot-failure auto-rollback
-     *   - System-level OTA (A/B): check whether U-Boot bootcount exceeds the limit
-     *     If exceeded, U-Boot has already switched back to the old slot, only log it
-     *   - Application-level OTA (APP): relies on watchdog crash_history to count crashes,
-     *     roll back by extracting backup_last.tar.gz after N consecutive failures
-     */
+    /* Phase 1: OTA boot-failure auto-rollback (system A/B + app crash rollback) */
     {
         ota_t *ota = ota_create("/opt/retail", "");
         if (ota) {
-            /* System-level A/B check: log only, no application-layer rollback required */
+            /* System-level A/B: log only */
             int sys_ret = ota_system_check_bootcount(ota);
             if (sys_ret == 1) {
                 LOGW("OTA-SYS: System upgrade failed, U-Boot has switched back to the old slot, continue booting");
             }
 
-            /* Application-level OTA check */
             int ret = ota_check_boot_failure(ota, dumpDir.toUtf8().constData());
             if (ret == 1) {
                 LOGW("OTA: Consecutive boot crashes, rolled back to the previous version, restarting...");
@@ -65,17 +58,11 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
-    /* Phase 2: After boot is stable, confirm the upgrade
-     *   - System-level: call ota_system_confirm to clear upgrade_available and mark ota_system_done
-     *     (one-shot confirmation here; the multi-boot N-times confirmation mechanism is
-     *      implemented by the systemd service health check)
-     *   - Application-level: clear the /opt/retail/ota_new_version mark
-     */
+    /* Phase 2: confirm upgrade after boot stable */
     QTimer::singleShot(OTA_BOOT_STABLE_SEC * 1000, []() {
         ota_clear_boot_mark(NULL);
         LOGI("OTA: Application-level boot is stable, clearing rollback mark");
 
-        /* System-level: confirm the upgrade after boot is stable */
         ota_t *sys_ota = ota_create("/opt/retail", "");
         if (sys_ota) {
             if (ota_system_confirm(sys_ota) == 0) {

@@ -1,114 +1,5 @@
 /*
- * LED PWM Driver — Character Device + PWM subsystem
- *
- * Platform: RK3568 (Topeet development board)
- * Bus: PWM (PWM1_CH0)
- *
- * Features:
- *   - Character device /dev/led_pwm (write 0~255 to control brightness)
- *   - Uses the Linux PWM subsystem for true analog dimming
- *   - Brightness 0 = PWM fully off
- *   - Brightness 255 = PWM 100% duty cycle
- *
- * ==================== Interview Knowledge: PWM Subsystem ====================
- *
- * 1. What is PWM
- *    Pulse Width Modulation.
- *    A square wave of fixed frequency; the proportion of high-level time to the
- *    total period = duty cycle. For an LED, 100% duty cycle = brightest, 50% =
- *    half bright, 0% = off. The human eye's persistence of vision averages the
- *    fast flickering into "brightness".
- *
- * 2. PWM subsystem architecture
- *
- *    Userspace
- *      │
- *      │ write(/dev/led_pwm, &brightness)
- *      ▼
- *    ┌─────────────┐
- *    │  Char device │  ← led_fops.write → pwm_config / pwm_enable
- *    └──────┬──────┘
- *           │
- *    ┌──────▼──────┐
- *    │  PWM core   │  ← drivers/pwm/core.c
- *    │  pwm_config()│     manages the global namespace of PWM channels
- *    │  pwm_enable()│     provides APIs such as pwm_get / pwm_put
- *    │  pwm_disable()│
- *    └──────┬──────┘
- *           │
- *    ┌──────▼──────┐
- *    │  PWM ctrl   │  ← drivers/pwm/pwm-rockchip.c
- *    │  (Rockchip) │     operates RK3568 PWM hardware registers
- *    └──────┬──────┘
- *           │
- *    ┌──────▼──────┐
- *    │  GPIO pin   │  ← physical IO outputs the PWM waveform
- *    └─────────────┘
- *
- * 3. PWM core API
- *
- *    #include <linux/pwm.h>
- *
- *    // Get the PWM device (in probe stage)
- *    struct pwm_device *pwm = devm_pwm_get(dev, NULL);
- *    // NULL = con_id, corresponds to the default pwms property in the device tree
- *
- *    // Configure duty cycle and period (in nanoseconds)
- *    int pwm_config(struct pwm_device *pwm, int duty_ns, int period_ns);
- *
- *    // Enable/disable PWM output
- *    pwm_enable(pwm);
- *    pwm_disable(pwm);
- *
- *    // Set polarity (active-high/active-low)
- *    int pwm_set_polarity(struct pwm_device *pwm, enum pwm_polarity polarity);
- *
- * 4. Device tree configuration
- *
- *    led_pwm {
- *        compatible = "retail,led_pwm";
- *        pwms = <&pwm1 0 1000000>;   // PWM1, channel 0, period=1ms=1000000ns
- *        // frequency = 1/period = 1kHz
- *    };
- *
- *    RK3568 PWM controller (docs: Rockchip PWM has 4 channels, each 1 channel):
- *      pwm0:  PWM0  (GPIO0_B7)
- *      pwm1:  PWM1  (GPIO4_C6)
- *      pwm2:  PWM2  (GPIO4_C2)
- *      pwm3:  PWM3  (GPIO0_C2)
- *      ...
- *      pwm15: PWM15 (GPIO3_B1)
- *
- * 5. Duty cycle calculation
- *
- *    User writes brightness (0~255):
- *      duty_ns = brightness * period_ns / 255
- *
- *    For example period=1000000ns (1kHz), brightness=128:
- *      duty_ns = 128 * 1000000 / 255 ≈ 501960ns → 50.2% duty cycle
- *
- * 6. PWM vs GPIO for LED control
- *
- *    GPIO approach:
- *      Only on (1) or off (0)
- *      Suitable for: status indicators
- *      Drawback: cannot adjust brightness
- *
- *    PWM approach:
- *      Continuous 0~255 brightness levels
- *      Suitable for: backlight / fill light
- *      Advantages: precise control of light intensity, adapts to ambient light
- *
- * 7. Application scenarios
- *
- *    Face recognition fill light:
- *      Ambient light sensor (BH1750) reads lux → calculates needed fill brightness from lux →
- *      write(fd, &brightness, 4) → PWM auto-outputs the corresponding duty cycle
- *
- *      Dark (lux<100): brightness=255 → 100% duty → brightest
- *      Dim (lux<500): brightness=180 → 71% duty → medium
- *      Normal (lux<1000): brightness=120 → 47% duty → low
- *      Bright (lux≥1000): brightness=50  → 20% duty → dim
+ * LED PWM Driver — character device + PWM subsystem
  */
 
 #define pr_fmt(fmt) "led_pwm: " fmt
@@ -141,16 +32,7 @@ struct led_pwm_data {
 
 static struct led_pwm_data *led_pwm_dev;
 
-/*
- * write() — set LED brightness
- *
- * Write int value: 0~255
- *   0   → PWM disable (LED off)
- *   1~255 → pwm_config(duty, period) + pwm_enable
- *
- * Duty cycle calculation:
- *   duty_ns = brightness * period_ns / 255
- */
+/* write(): 0 = off, 1~255 = brightness */
 static ssize_t led_pwm_write(struct file *filp, const char __user *buf,
                              size_t count, loff_t *off)
 {
@@ -175,10 +57,7 @@ static ssize_t led_pwm_write(struct file *filp, const char __user *buf,
     if (brightness == 0) {
         pwm_disable(led_pwm_dev->pwm);
     } else {
-        /*
-         * duty_ns = (brightness / 255) * period_ns
-         * Multiply first, then divide, to avoid floating point
-         */
+        /* multiply before divide to keep integer precision */
         duty_ns = brightness * led_pwm_dev->period_ns / LED_MAX_BRIGHTNESS;
         pwm_config(led_pwm_dev->pwm, duty_ns, led_pwm_dev->period_ns);
         pwm_enable(led_pwm_dev->pwm);
@@ -211,8 +90,6 @@ static struct file_operations led_pwm_fops = {
     .read  = led_pwm_read,
     .write = led_pwm_write,
 };
-
-/* ======================== sysfs ======================== */
 
 static ssize_t brightness_show(struct device *dev,
                                 struct device_attribute *attr, char *buf)
@@ -250,8 +127,6 @@ static struct attribute *led_pwm_sysfs_attrs[] = {
 };
 ATTRIBUTE_GROUPS(led_pwm_sysfs);
 
-/* ======================== platform_driver ======================== */
-
 static int led_pwm_probe(struct platform_device *pdev)
 {
     int ret;
@@ -264,16 +139,6 @@ static int led_pwm_probe(struct platform_device *pdev)
     mutex_init(&led_pwm_dev->lock);
     led_pwm_dev->period_ns = LED_PWM_PERIOD_NS;
 
-    /*
-     * devm_pwm_get — get the PWM device
-     *
-     * Corresponds to the device tree:
-     *   pwms = <&pwm1 0 1000000>;
-     *            ↑   ↑  ↑
-     *            │   │  └── period (ns), can be overridden by the driver
-     *            │   └──── channel (channel number within the PWM controller)
-     *            └──────── PWM controller phandle
-     */
     led_pwm_dev->pwm = devm_pwm_get(dev, NULL);
     if (IS_ERR(led_pwm_dev->pwm)) {
         ret = PTR_ERR(led_pwm_dev->pwm);
@@ -282,18 +147,11 @@ static int led_pwm_probe(struct platform_device *pdev)
         return ret;
     }
 
-    /*
-     * Set the initial period (this overrides the device tree default)
-     *
-     * pwm_config parameters:
-     *   duty_ns  = 0 (initial duty 0, LED off)
-     *   period_ns = LED_PWM_PERIOD_NS
-     */
+    /* Initial duty 0 (LED off) */
     pwm_config(led_pwm_dev->pwm, 0, led_pwm_dev->period_ns);
 
     led_pwm_dev->brightness = 0;
 
-    /* Character device */
     ret = alloc_chrdev_region(&led_pwm_dev->devid, 0, 1, LED_PWM_DEV_NAME);
     if (ret) return ret;
 

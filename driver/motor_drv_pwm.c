@@ -1,89 +1,5 @@
 /*
  * Stepper Motor PWM Subsystem Driver — A4988 / DRV8825 / TMC2208
- *
- * Applicable chips: A4988, DRV8825, TMC2208, TB6600 and other STEP/DIR interface
- *                   stepper motor driver chips.
- *
- * Hardware wiring (RK3568 → A4988):
- *   PWM  → STEP  (pulse signal, one pulse = one step)
- *   GPIO → DIR   (direction, HIGH=CW, LOW=CCW)
- *   GPIO → EN    (enable, optional, LOW=enabled)
- *
- * Device tree:
- *   stepper {
- *       compatible = "retail,stepper-pwm";
- *       pwms = <&pwm2 0 50000>;        // PWM2_CH0, period=50us→20kHz
- *       enable-gpios = <&gpio3 12 GPIO_ACTIVE_HIGH>;  // EN
- *       dir-gpios  = <&gpio3 13 GPIO_ACTIVE_HIGH>;  // DIR
- *       default-speed-hz = <1000>;     // default 1000 steps/sec
- *       max-speed-hz = <5000>;         // max 5000 steps/sec
- *   };
- *
- * Character device: /dev/stepper_pwm
- *   write(int steps)  → rotate the specified number of steps
- *   ioctl             → set speed/direction
- *
- * ==================== Interview Knowledge Points ====================
- *
- * 1. PWM subsystem
- *
- *    The Linux PWM subsystem provides a unified PWM control interface.
- *
- *    Core API:
- *      pwm_get()        — get a PWM device from the device tree "pwms" property
- *      pwm_config()     — set period and duty_cycle
- *      pwm_enable()     — enable PWM output
- *      pwm_disable()    — disable PWM output
- *      pwm_put()        — release the PWM device
- *
- *    Device tree "pwms" property format:
- *      pwms = <&pwmX channel period_ns>;
- *      e.g.: pwms = <&pwm2 0 50000>;  // PWM2, channel 0, 50us period
- *
- *    PWM controlling A4988 stepper motor:
- *      - STEP pin connected to PWM output
- *      - one PWM pulse = motor moves one step
- *      - frequency = step rate (Hz)
- *      - 50% duty cycle is sufficient (A4988 triggers on rising edge)
- *
- * 2. A4988 driver chip
- *
- *    A4988 is Allegro's DMOS microstepping motor driver chip. Features:
- *      - supports 1/1, 1/2, 1/4, 1/8, 1/16 microstepping
- *      - up to 2A output current (needs cooling)
- *      - STEP/DIR interface, simple to use
- *      - has thermal/overcurrent protection
- *
- *    Pins:
- *      STEP    — pulse input, triggers on rising edge
- *      DIR     — direction control, HIGH=CW
- *      MS1/MS2/MS3 — microstep resolution selection
- *      ENABLE  — enable, LOW=enabled, HIGH=disabled
- *      SLEEP   — sleep, LOW=sleep
- *      RESET   — reset, LOW=reset
- *
- * 3. Comparison with ULN2003 (motor_drv.c)
- *
- *    ULN2003 (28BYJ-48):
- *      - needs 4 GPIOs switched in phase sequence
- *      - must use hrtimer to output beat by beat
- *      - accuracy affected by timer response latency
- *      - suitable for low-cost, low-precision scenarios
- *
- *    A4988 (PWM):
- *      - only needs 1 PWM + 1 GPIO (DIR)
- *      - hardware auto-generates pulses, high precision
- *      - supports microstepping, smoother
- *      - suitable for high-precision, high-speed scenarios
- *
- * 4. PWM step frequency calculation
- *
- *    period_ns = 1e9 / frequency_hz (nanoseconds)
- *    e.g.:
- *      1000 Hz → period = 1,000,000 ns = 1ms
- *      5000 Hz → period = 200,000 ns = 200us
- *
- *    duty cycle = 50% → duty_cycle = period_ns / 2
  */
 
 #define pr_fmt(fmt) "stepper_pwm: " fmt
@@ -134,11 +50,7 @@ struct stepper_data {
     struct hrtimer      timer;
 };
 
-/* ======================== hrtimer step completion callback ======================== */
-
-/*
- * Timer expiry = steps completed, stop PWM
- */
+/* Timer expiry = steps completed, stop PWM */
 static enum hrtimer_restart stepper_done_cb(struct hrtimer *t)
 {
     struct stepper_data *dev = container_of(t, struct stepper_data, timer);
@@ -150,19 +62,6 @@ static enum hrtimer_restart stepper_done_cb(struct hrtimer *t)
     return HRTIMER_NORESTART;
 }
 
-/*
- * Start stepping
- *
- * Principle:
- *   1. Set the DIR GPIO
- *   2. Configure PWM period and duty cycle (50%)
- *   3. Enable PWM → hardware starts generating pulses
- *   4. Start hrtimer to wait for step completion
- *
- * Duration calculation:
- *   duration_ns = steps * 1e9 / speed_hz
- *   e.g.: 1000 steps @ 1000Hz → 1,000,000,000 ns = 1 second
- */
 static int stepper_start(struct stepper_data *dev, int steps)
 {
     u64 duration_ns;
@@ -170,27 +69,21 @@ static int stepper_start(struct stepper_data *dev, int steps)
     if (dev->speed_hz <= 0)
         return -EINVAL;
 
-    /* Set direction */
     gpiod_set_value(dev->dir_gpio, dev->direction);
 
-    /* Configure PWM: 50% duty cycle */
     pwm_config(dev->pwm, dev->period_ns / 2, dev->period_ns);
 
-    /* Enable PWM */
     pwm_enable(dev->pwm);
 
     dev->target_steps = steps;
     dev->current_step = 0;
     dev->running = true;
 
-    /* Compute duration and start the timer */
     duration_ns = (u64)steps * 1000000000ULL / dev->speed_hz;
     hrtimer_start(&dev->timer, ns_to_ktime(duration_ns), HRTIMER_MODE_REL);
 
     return 0;
 }
-
-/* ======================== Character device operations ======================== */
 
 static struct stepper_data *stepper_from_file(struct file *filp)
 {
@@ -203,7 +96,6 @@ static int stepper_open(struct inode *inode, struct file *filp)
                                              struct stepper_data, cdev);
     filp->private_data = dev;
 
-    /* Enable the driver chip */
     if (dev->enable_gpio)
         gpiod_set_value(dev->enable_gpio, 0);  /* LOW = enabled */
 
@@ -220,18 +112,13 @@ static int stepper_release(struct inode *inode, struct file *filp)
         dev->running = false;
     }
 
-    /* Disable the driver chip */
     if (dev->enable_gpio)
         gpiod_set_value(dev->enable_gpio, 1);
 
     return 0;
 }
 
-/*
- * write(int steps) — rotate the specified number of steps
- *
- * Positive = CW, negative = CCW
- */
+/* write(int steps): positive=CW, negative=CCW */
 static ssize_t stepper_write(struct file *filp, const char __user *buf,
                              size_t count, loff_t *off)
 {
@@ -247,7 +134,6 @@ static ssize_t stepper_write(struct file *filp, const char __user *buf,
 
     mutex_lock(&dev->lock);
 
-    /* Stop any running stepping */
     if (dev->running) {
         hrtimer_cancel(&dev->timer);
         pwm_disable(dev->pwm);
@@ -267,7 +153,6 @@ static ssize_t stepper_write(struct file *filp, const char __user *buf,
     }
 
     if (stepper_start(dev, steps) == 0) {
-        /* Update accumulated position */
         if (dev->direction == 0)
             dev->position += steps;
         else
@@ -301,8 +186,6 @@ static ssize_t stepper_read(struct file *filp, char __user *buf,
     return sizeof(status);
 }
 
-/* ======================== ioctl ======================== */
-
 #define STEPPER_IOC_MAGIC      'S'
 #define STEPPER_IOC_SET_SPEED  _IOW(STEPPER_IOC_MAGIC, 1, int)
 #define STEPPER_IOC_GET_SPEED  _IOR(STEPPER_IOC_MAGIC, 2, int)
@@ -327,12 +210,6 @@ static long stepper_ioctl(struct file *filp, unsigned int cmd, unsigned long arg
             return -EINVAL;
         mutex_lock(&dev->lock);
         dev->speed_hz = val;
-        /*
-         * Compute the PWM period from the speed:
-         *   period_ns = 1e9 / speed_hz
-         *   But the PWM period can't be too small; ensure at least 50% duty
-         *   has sufficient pulse width
-         */
         dev->period_ns = 1000000000 / val;
         if (dev->period_ns < 1000)   /* Min 1us period (1MHz) */
             dev->period_ns = 1000;
@@ -388,8 +265,6 @@ static struct file_operations stepper_fops = {
     .write          = stepper_write,
     .unlocked_ioctl = stepper_ioctl,
 };
-
-/* ======================== sysfs ======================== */
 
 static inline struct stepper_data *to_stepper(struct device *dev)
 {
@@ -450,8 +325,6 @@ static struct attribute *stepper_sysfs_attrs[] = {
 };
 ATTRIBUTE_GROUPS(stepper_sysfs);
 
-/* ======================== platform_driver ======================== */
-
 static int stepper_pwm_probe(struct platform_device *pdev)
 {
     int ret;
@@ -468,12 +341,10 @@ static int stepper_pwm_probe(struct platform_device *pdev)
     dev->direction = 0;
     dev->position = 0;
 
-    /* Parse device tree properties */
     of_property_read_u32(parent->of_node, "default-speed-hz", &default_speed);
     dev->speed_hz = (int)default_speed;
     dev->period_ns = 1000000000 / dev->speed_hz;
 
-    /* Get the PWM device */
     dev->pwm = devm_pwm_get(parent, NULL);
     if (IS_ERR(dev->pwm)) {
         ret = PTR_ERR(dev->pwm);
@@ -482,23 +353,19 @@ static int stepper_pwm_probe(struct platform_device *pdev)
         return ret;
     }
 
-    /* Get the DIR GPIO */
     dev->dir_gpio = devm_gpiod_get(parent, "dir", GPIOD_OUT_LOW);
     if (IS_ERR(dev->dir_gpio)) {
         dev_err(parent, "Failed to get DIR GPIO\n");
         return PTR_ERR(dev->dir_gpio);
     }
 
-    /* Get the ENABLE GPIO (optional) */
     dev->enable_gpio = devm_gpiod_get_optional(parent, "step", GPIOD_OUT_HIGH);
     if (IS_ERR(dev->enable_gpio))
         dev->enable_gpio = NULL;
 
-    /* Initialize timer */
     hrtimer_init(&dev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
     dev->timer.function = stepper_done_cb;
 
-    /* Register char device */
     ret = alloc_chrdev_region(&dev->devid, 0, 1, STEPPER_DEV_NAME);
     if (ret) return ret;
 

@@ -44,13 +44,7 @@ typedef struct {
     time_t create_time;
 } order_info_t;
 
-/*
- * OTA types:
- *   APP    : lightweight app-level OTA (replaces executables under /opt/retail,
- *            tar.gz backup for rollback)
- *   SYSTEM : full system-level OTA (A/B partitions + swupdate + libubootenv,
- *            U-Boot bootcount rollback)
- */
+/* OTA types: APP = app-level (tar.gz rollback), SYSTEM = full A/B + swupdate */
 typedef enum {
     OTA_TYPE_APP    = 0,
     OTA_TYPE_SYSTEM = 1

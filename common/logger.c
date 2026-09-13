@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <syslog.h>
 #include <errno.h>
+#include <fcntl.h>
 
 static logger_t *g_default_logger = NULL;
 
@@ -39,40 +40,51 @@ static void ring_destroy(log_ring_t *r)
 
 static int ring_push(log_ring_t *r, const log_entry_t *entry)
 {
-    int head, next;
+    uint64_t head, next;
 
     do {
         head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
-        next = (head + 1) & r->mask;
-        if (next == __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE))
+        /* head - tail is the occupied count; a stale read only errs toward
+         * "full" (drop one log), never toward "not full". */
+        if (head - __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE) >= (uint64_t)r->size)
             return -1;
+        next = head + 1;
     } while (!__atomic_compare_exchange_n(&r->head, &head, next,
                                           0, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 
-    memcpy(&r->ring[head], entry, sizeof(log_entry_t));
-    __atomic_store_n(&r->ready[head], 1, __ATOMIC_RELEASE);
+    /* CAS won: head didn't move since the load (monotonic counter, no ABA),
+     * so the full check still holds and this slot is exclusively ours. */
+    int slot = (int)(head & (uint64_t)r->mask);
+    memcpy(&r->ring[slot], entry, sizeof(log_entry_t));
+    __atomic_store_n(&r->ready[slot], 1, __ATOMIC_RELEASE);
     return 0;
 }
 
 
 static int ring_pop(log_ring_t *r, log_entry_t *entry)
 {
-    pthread_mutex_lock(&r->pop_mtx);
+    /* trylock (not lock): ring_pop is also reached from signal context via
+     * logger_flush; if the interrupted thread is the flush thread holding
+     * pop_mtx, a blocking lock would self-deadlock and the crash dump would
+     * never be written. Both callers treat -1 as "retry / give up". */
+    if (pthread_mutex_trylock(&r->pop_mtx) != 0)
+        return -1;
 
-    int tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    uint64_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
     if (tail == __atomic_load_n(&r->head, __ATOMIC_ACQUIRE)) {
         pthread_mutex_unlock(&r->pop_mtx);
         return -1;
     }
 
-    if (__atomic_load_n(&r->ready[tail], __ATOMIC_ACQUIRE) != 1) {
+    int slot = (int)(tail & (uint64_t)r->mask);
+    if (__atomic_load_n(&r->ready[slot], __ATOMIC_ACQUIRE) != 1) {
         pthread_mutex_unlock(&r->pop_mtx);
         return -1;
     }
 
-    memcpy(entry, &r->ring[tail], sizeof(log_entry_t));
-    __atomic_store_n(&r->ready[tail], 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&r->tail, (tail + 1) & r->mask, __ATOMIC_RELEASE);
+    memcpy(entry, &r->ring[slot], sizeof(log_entry_t));
+    __atomic_store_n(&r->ready[slot], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->tail, tail + 1, __ATOMIC_RELEASE);
 
     pthread_mutex_unlock(&r->pop_mtx);
     return 0;
@@ -174,6 +186,35 @@ static void write_entry_to_file(logger_t *log, const log_entry_t *entry)
     log->bytes_written += strlen(entry->msg) + 64;
 }
 
+/* Crash-path write into a separate ".crash" sidecar file: no shared FILE*,
+ * no interleaving with the flush thread's buffered stdio writes (O_APPEND
+ * only makes each single write() atomic — one fprintf line can still span
+ * two write() calls at a 64KB buffer boundary and get split by a concurrent
+ * writer). The sidecar keeps crash logs intact without touching log->fp,
+ * which may be mid-rotation (fclose/fopen) over in the flush thread. */
+static void write_entry_crash_file(logger_t *log, const log_entry_t *entry)
+{
+    char path[LOG_PATH_MAX + 8];
+    snprintf(path, sizeof(path), "%s.crash", log->current_path);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm tm_val;
+    localtime_r(&tv.tv_sec, &tm_val);
+
+    char time_buf[32];
+    snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d.%03ld",
+             tm_val.tm_hour, tm_val.tm_min, tm_val.tm_sec,
+             tv.tv_usec / 1000);
+
+    dprintf(fd, "[%s][%s][%d] %s\n",
+            time_buf, level_str(entry->level), getpid(), entry->msg);
+    close(fd);
+}
+
 static void *flush_thread(void *arg)
 {
     logger_t *log = (logger_t *)arg;
@@ -191,18 +232,39 @@ static void *flush_thread(void *arg)
         }
 
         if (flushed == 0) {
-            struct timespec ts;
-            ts.tv_sec = log->flush_interval;
-            ts.tv_nsec = 0;
-            nanosleep(&ts, NULL);
+            if (ring_empty(&log->ring)) {
+                /* truly idle: long sleep */
+                struct timespec ts;
+                ts.tv_sec = log->flush_interval;
+                ts.tv_nsec = 0;
+                nanosleep(&ts, NULL);
+            } else {
+                /* head-of-line slot not ready yet (producer still writing its
+                 * entry): brief pause, not the idle sleep — otherwise a fast
+                 * consumer that catches up with the producers stalls 2s while
+                 * the ring overflows and drops entries */
+                struct timespec ts = {0, 1 * 1000 * 1000};
+                nanosleep(&ts, NULL);
+            }
         }
     }
 
-    while (!ring_empty(&log->ring)) {
+    /* Drain the ring at shutdown. pop can transiently fail (trylock
+     * contention, or a slot whose producer was interrupted mid-write);
+     * bounded retries instead of spinning forever on !ring_empty. */
+    int idle = 0;
+    while (idle < 4) {
         if (ring_pop(&log->ring, &entry) == 0) {
+            idle = 0;
             pthread_mutex_lock(&log->file_mtx);
             write_entry_to_file(log, &entry);
             pthread_mutex_unlock(&log->file_mtx);
+        } else if (ring_empty(&log->ring)) {
+            break;
+        } else {
+            idle++;
+            struct timespec ts = {0, 5 * 1000 * 1000};
+            nanosleep(&ts, NULL);
         }
     }
 
@@ -257,7 +319,8 @@ int logger_start(logger_t *log)
     if (!log) return -1;
     if (log->running) return 0;
 
-    log->running = 1;
+    /* release store pairs with the flush thread's acquire load */
+    __atomic_store_n(&log->running, 1, __ATOMIC_RELEASE);
 
     if (log->use_syslog) {
         openlog(log->log_file, LOG_PID | LOG_CONS, LOG_USER);
@@ -274,7 +337,8 @@ int logger_start(logger_t *log)
 void logger_stop(logger_t *log)
 {
     if (!log || !log->running) return;
-    log->running = 0;
+    /* release store pairs with the flush thread's acquire load */
+    __atomic_store_n(&log->running, 0, __ATOMIC_RELEASE);
     pthread_join(log->flush_tid, NULL);
 }
 
@@ -339,14 +403,24 @@ void logger_flush(logger_t *log)
 
     log_entry_t entry;
     /* Use trylock to avoid deadlock in signal handlers: if a crash happens
-     * while logger_write holds file_mtx, lock would deadlock; trylock skips
-     * it and pops remaining data directly. */
+     * while the flush thread holds file_mtx, a blocking lock would deadlock;
+     * trylock falls back to the .crash sidecar file below. */
     int locked = (pthread_mutex_trylock(&log->file_mtx) == 0);
     while (ring_pop(&log->ring, &entry) == 0) {
-        write_entry_to_file(log, &entry);
+        if (locked) {
+            write_entry_to_file(log, &entry);
+        } else {
+            /* Flush thread owns log->fp (possibly mid-rotation: fclose +
+             * fopen). Using fp here would be a use-after-free, and a raw
+             * append to the same file would tear lines across the stdio
+             * buffer boundary — write to the .crash sidecar instead. */
+            write_entry_crash_file(log, &entry);
+        }
     }
-    if (log->fp) fflush(log->fp);
-    if (locked) pthread_mutex_unlock(&log->file_mtx);
+    if (locked) {
+        if (log->fp) fflush(log->fp);
+        pthread_mutex_unlock(&log->file_mtx);
+    }
 }
 
 logger_t* logger_get_default(void)

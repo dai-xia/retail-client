@@ -1,15 +1,8 @@
 /**
  * @file rga_transform.c
- * @brief RK3568 RGA2 image format conversion (librga im2d API)
+ * @brief RK3568 RGA2 image format conversion (librga im2d API).
  *
- * librga im2d is stateless; no instance handle is needed. Call
- * rga_transform_available() to probe, then rga_transform_process() to convert.
- *
- * WARNING: im2d is not thread-safe; concurrent rga_transform_process calls
- * must be serialized with an external mutex, otherwise HW racing causes
- * screen corruption / crash.
- *
- * Build: USE_RGA macro + librga library.
+ * WARNING: im2d is not thread-safe; serialize concurrent calls with a mutex.
  */
 
 #include "rga_transform.h"
@@ -29,8 +22,6 @@
 #include "RgaUtils.h"
 #include "rga.h"
 
-/* ======================== Internal helpers ======================== */
-
 static int to_rga_format(rga_pixel_format fmt)
 {
     switch (fmt) {
@@ -48,18 +39,11 @@ static int to_rga_format(rga_pixel_format fmt)
     }
 }
 
-/* ======================== Public API ======================== */
-
 /*
- * RGA one-shot: format conversion + scaling + crop.
- *   rga_image_t.fd >= 0 -> DMA-BUF zero-copy mode (wrapbuffer_fd)
- *   rga_image_t.fd  < 0 -> user virtual address mode (wrapbuffer_virtualaddr)
- *
- * HW constraints (must be obeyed):
- *   - wstride must be 16-byte aligned, otherwise improcess corrupts or fails
- *   - out-of-bounds src_rect does NOT error, image will be garbled; caller
- *     must guarantee bounds
- *   - concurrent calls require an external lock
+ * RGA one-shot: conversion + scaling + crop.
+ *   fd >= 0 -> DMA-BUF zero-copy; fd < 0 -> vir_addr mode.
+ *   wstride must be 16-byte aligned; OOB src_rect does not error (caller
+ *   guarantees bounds); concurrent calls require an external lock.
  * Returns 0=success, -1=failure.
  */
 int rga_transform_process(const rga_image_t *src,
@@ -106,8 +90,7 @@ int rga_transform_process(const rga_image_t *src,
         }
     }
 
-    /* ROI crop: crop_rect {x,y,w,h} all zero -> whole frame; otherwise take the
-     * w x h region starting at [x,y]. Caller guarantees x+w<=width && y+h<=height. */
+    /* crop_rect all-zero = whole frame; caller guarantees bounds. */
     im_rect crop_rect = {};
     if (src_rect) {
         crop_rect.x      = src_rect[0];
@@ -116,10 +99,6 @@ int rga_transform_process(const rga_image_t *src,
         crop_rect.height = src_rect[3];
     }
 
-    /* improcess(src, dst, pat, srect, drect, prect, usage)
-     *   srect: source crop region (zero = whole frame)
-     *   drect: dest region (zero = fill dst)
-     *   usage: IM_SYNC (blocking) */
     rga_buffer_t pat = {0};
     im_rect srect = crop_rect;
     im_rect drect = {0};
@@ -145,24 +124,7 @@ bool rga_transform_available(void)
     return false;
 }
 
-/*
- * Allocate DMA-BUF via dma_heap for zero-copy sharing across RGA/RKNN/VPU.
- *
- * Principle:
- *   1. open /dev/dma_heap/cma (contiguous physical memory; RGA/RKNN require it)
- *   2. DMA_HEAP_IOCTL_ALLOC returns a dma_buf fd directly
- *   3. close the heap fd (the dma_buf fd holds the reference; memory stays)
- *
- * Why not DRM dumb buffer:
- *   - dma_heap is the standard Linux 5.6+ DMA-BUF allocator
- *   - supports alignment + memory type selection; RGA/VPU usually need 64/128B
- *   - no need to open /dev/dri/card0, cleaner permissions
- *
- * DMA-BUF usage:
- *   - RGA writes (improcess via wrapbuffer_fd output)
- *   - RKNN reads (rknn_input.fd = dma_buf_fd, pass_through=1)
- *   - FFmpeg rkmpp encode (AVDRMFrameDescriptor)
- */
+/* DMA-BUF via /dev/dma_heap/cma (128-byte alignment) for zero-copy RGA/RKNN/VPU sharing. */
 
 /* <linux/dma-heap.h> may be missing from headers, inline the ABI */
 #include <linux/ioctl.h>
@@ -204,24 +166,23 @@ static int try_dma_heap_alloc(const char *name, size_t size, size_t alignment)
 
 int rga_dma_buf_alloc(size_t size)
 {
-    /* RGA2 usually needs 64/128B alignment; RKNN/VPU also prefer 128B */
+    /* RGA2/RKNN/VPU prefer 128B alignment */
     const size_t alignment = 128;
 
-    /* Prefer cma (contiguous physical memory), best for RGA/RKNN zero-copy */
+    /* Prefer cma for zero-copy */
     int fd = try_dma_heap_alloc("cma", size, alignment);
     if (fd >= 0) {
         fprintf(stdout, "[RGA] DMA-BUF alloc(cma): size=%zu fd=%d\n", size, fd);
         return fd;
     }
 
-    /* Try rk-named heap */
     fd = try_dma_heap_alloc("rk-dma-heap-cma", size, alignment);
     if (fd >= 0) {
         fprintf(stdout, "[RGA] DMA-BUF alloc(rk-dma-heap-cma): size=%zu fd=%d\n", size, fd);
         return fd;
     }
 
-    /* Fallback to system heap (may be non-contiguous; some HW may not support) */
+    /* Fallback: system heap (may be non-contiguous) */
     fd = try_dma_heap_alloc("system", size, alignment);
     if (fd >= 0) {
         fprintf(stdout, "[RGA] DMA-BUF alloc(system): size=%zu fd=%d\n", size, fd);

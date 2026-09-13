@@ -13,8 +13,6 @@
 #define TOSTRING(x) TOSTRING_HELPER(x)
 #endif
 
-/************************* SHA256 *************************/
-
 int ota_sha256_file(const char *filepath, char hex_out[OTA_SHA256_HEX_LEN])
 {
     FILE *fp = fopen(filepath, "rb");
@@ -46,8 +44,6 @@ int ota_sha256_verify(const char *filepath, const char *expected_hex)
     if (ota_sha256_file(filepath, actual) != 0) return -1;
     return (strcasecmp(actual, expected_hex) == 0) ? 0 : -1;
 }
-
-/************************* OTA core *************************/
 
 ota_t* ota_create(const char *work_dir, const char *current_version)
 {
@@ -120,7 +116,6 @@ int ota_rollback(ota_t *ota)
         return -1;
     }
 
-    /* Clean up old dir */
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", old_dir);
     system(cmd);
 
@@ -128,11 +123,7 @@ int ota_rollback(ota_t *ota)
     return 0;
 }
 
-/*
- * ======================== Boot failure auto-rollback (APP) ========================
- * Relies on the watchdog's crash_history to count crashes after an OTA upgrade;
- * no separate boot_count is kept to avoid duplicate counters.
- */
+/* APP boot-failure rollback: reuse watchdog crash_history (no separate boot counter) */
 
 int ota_set_boot_mark(ota_t *ota)
 {
@@ -175,13 +166,7 @@ void ota_clear_boot_mark(ota_t *ota)
     unlink(OTA_NEW_VERSION_PATH);
 }
 
-/************************* System-level OTA (A/B + swupdate) *************************/
-
-/*
- * libubootenv wrapper: uses fw_printenv / fw_setenv so we don't need to link
- * libubootenv.so, reducing build dependencies. Requires uboot-envtools at
- * deploy time.
- */
+/* fw_printenv/fw_setenv wrapper: avoids linking libubootenv; needs uboot-envtools deployed */
 static int uboot_get_env(const char *name, char *out, size_t out_len)
 {
     char cmd[256];
@@ -195,7 +180,6 @@ static int uboot_get_env(const char *name, char *out, size_t out_len)
     }
     pclose(fp);
 
-    /* Trim trailing newline */
     size_t len = strlen(out);
     while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
         out[--len] = '\0';
@@ -214,7 +198,6 @@ const char* ota_system_get_current_slot(void)
 {
     static char slot[8];
     if (uboot_get_env("boot_slot", slot, sizeof(slot)) != 0) {
-        /* Default _a */
         strncpy(slot, "_a", sizeof(slot) - 1);
         slot[sizeof(slot) - 1] = '\0';
     }
@@ -267,7 +250,6 @@ int ota_system_set_upgrade_env(ota_t *ota)
 
     LOGI("OTA-SYS: switching active slot %s -> %s", cur_slot, next_slot);
 
-    /* Set upgrade marker, reset bootcount, switch boot_slot */
     if (uboot_set_env("upgrade_available", "1") != 0) {
         LOGE("OTA-SYS: set upgrade_available failed");
         return -1;
@@ -297,7 +279,6 @@ int ota_system_confirm(ota_t *ota)
 {
     if (!ota) return -1;
 
-    /* Confirm upgrade after the new system boots stably */
     if (uboot_set_env("upgrade_available", "0") != 0) {
         LOGE("OTA-SYS: clear upgrade_available failed");
         return -1;
@@ -323,7 +304,6 @@ int ota_system_check_bootcount(ota_t *ota)
     if (uboot_get_env("upgrade_available", val, sizeof(val)) != 0)
         return 0;
 
-    /* Not in an upgrade, nothing to check */
     if (atoi(val) != 1) return 0;
 
     if (uboot_get_env("bootcount", val, sizeof(val)) != 0)

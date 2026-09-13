@@ -8,34 +8,15 @@
 #include <errno.h>
 
 /*
- * ======================== PWM configuration ========================
- *
- * Uses /sys/class/pwm subsystem, no custom kernel driver required.
- *
- * Ensure the kernel has loaded the PWM controller driver and the device tree enables the corresponding PWM channel.
- *
- * Default pin assignment (RK3568):
- *   LED:   PWM1_CH0 -> /sys/class/pwm/pwmchip1    (GPIO4_C6)
- *   Motor: PWM2_CH0 -> /sys/class/pwm/pwmchip2    (GPIO4_C2)
- *
- * If the actual hardware uses different channels, modify LED_PWM_CHIP and MOTOR_PWM_CHIP below.
+ * PWM via /sys/class/pwm sysfs, no custom kernel driver.
+ * RK3568 default pins: LED PWM1_CH0 -> pwmchip1 (GPIO4_C6), Motor PWM2_CH0 -> pwmchip2 (GPIO4_C2).
  */
 
 #define LED_PWM_CHIP      0      /* PWM1 -> pwmchip1 */
 #define LED_PWM_CHANNEL   0      /* channel 0 -> pwm1 */
 #define LED_PWM_PERIOD_NS 1000000 /* 1ms period -> 1kHz */
 
-/*
- * pwm_export - export a PWM channel
- *
- * Usage:
- *   echo <channel> > /sys/class/pwm/pwmchipN/export
- *
- * On success a pwm<channel>/ directory appears under /sys/class/pwm/pwmchipN/,
- * containing period, duty_cycle, enable control files.
- *
- * Returns: 0 success, -1 failure
- */
+/* Returns: 0 success, -1 failure */
 static int pwm_export(int chip, int channel)
 {
     char path[128];
@@ -58,9 +39,6 @@ static int pwm_export(int chip, int channel)
     return 0;
 }
 
-/*
- * pwm_unexport - unexport a PWM channel
- */
 static void pwm_unexport(int chip, int channel)
 {
     char path[128];
@@ -76,12 +54,6 @@ static void pwm_unexport(int chip, int channel)
     close(fd);
 }
 
-/*
- * pwm_open_attr - open a PWM attribute file
- *
- * e.g. pwm_open_attr(chip, channel, "duty_cycle") ->
- *       open /sys/class/pwm/pwmchip1/pwm0/duty_cycle
- */
 static int pwm_open_attr(int chip, int channel, const char *attr)
 {
     char path[128];
@@ -89,8 +61,6 @@ static int pwm_open_attr(int chip, int channel, const char *attr)
              chip, channel, attr);
     return open(path, O_RDWR);
 }
-
-/* ======================== BH1750 ======================== */
 
 int bh1750_open(void)
 {
@@ -128,8 +98,6 @@ int bh1750_ioctl_get_lux(int fd, int *lux)
 {
     return ioctl(fd, BH1750_IOC_GET_LUX, lux);
 }
-
-/* ======================== RC522 ======================== */
 
 int rc522_open(void)
 {
@@ -188,28 +156,14 @@ int rc522_ioctl_write_block(int fd, uint8_t block, const uint8_t *data)
 }
 
 /*
- * ======================== LED (PWM sysfs) ========================
- *
- * Uses /sys/class/pwm for 0~255 level brightness control.
- *
- * Principle:
- *   led_open()    -> export PWM channel, set period, open duty_cycle + enable
- *   led_set(fd)   -> write duty_cycle (0 disables PWM)
- *   led_get(fd)   -> read current duty_cycle, convert to 0~255
- *   led_close(fd) -> close file, unexport
- *
- * fd meaning:
- *   Return value is not a single fd, but a small index.
- *   Simplified design here: led_open returns the fd of the duty_cycle file,
- *   led_set writes the duty_cycle value.
- *   Production code should wrap it in a struct; here we keep the original API compatible.
+ * LED brightness (0~255) via /sys/class/pwm duty_cycle.
+ * led_open() returns the duty_cycle file descriptor.
  */
 
 int led_open(void)
 {
     int duty_fd;
 
-    /* 1. Export PWM channel */
     if (pwm_export(LED_PWM_CHIP, LED_PWM_CHANNEL) != 0) {
         perror("PWM export (LED) failed");
         return -1;
@@ -217,7 +171,6 @@ int led_open(void)
 
     usleep(1000);
 
-    /* 3. Initially disable PWM */
     {
         int en_fd = pwm_open_attr(LED_PWM_CHIP, LED_PWM_CHANNEL, "enable");
         if (en_fd >= 0) {
@@ -226,7 +179,6 @@ int led_open(void)
         }
     }
 
-    /* 2. Set period (frequency) */
     {
         int period_fd = pwm_open_attr(LED_PWM_CHIP, LED_PWM_CHANNEL, "period");
         if (period_fd >= 0) {
@@ -237,9 +189,6 @@ int led_open(void)
         }
     }
 
-
-
-    /* 4. Open duty_cycle, return as main fd */
     duty_fd = pwm_open_attr(LED_PWM_CHIP, LED_PWM_CHANNEL, "duty_cycle");
     if (duty_fd < 0) {
         perror("LED duty_cycle open failed");
@@ -249,15 +198,7 @@ int led_open(void)
     return duty_fd;
 }
 
-/*
- * led_set - set LED brightness
- *
- * brightness: 0~255
- *   0   -> duty_cycle=0, disable PWM (LED off)
- *   N   -> duty_cycle = N * period / 255, enable PWM
- *
- * fd is the duty_cycle file descriptor returned by led_open.
- */
+/* brightness 0~255; 0 disables PWM, N -> duty = N * period / 255 */
 int led_set(int fd, int brightness)
 {
     char buf[32];
@@ -269,7 +210,6 @@ int led_set(int fd, int brightness)
     if (brightness > 255) brightness = 255;
 
     if (brightness == 0) {
-        /* Brightness 0 -> disable PWM */
         en_fd = pwm_open_attr(LED_PWM_CHIP, LED_PWM_CHANNEL, "enable");
         if (en_fd >= 0) {
             write(en_fd, "0", 1);
@@ -278,13 +218,11 @@ int led_set(int fd, int brightness)
         return 0;
     }
 
-    /* Write duty_cycle: duty_ns = (brightness / 255) * period_ns */
     duty_ns = brightness * LED_PWM_PERIOD_NS / 255;
     len = snprintf(buf, sizeof(buf), "%d", duty_ns);
     if (write(fd, buf, (size_t)len) != len)
         return -1;
 
-    /* Enable PWM */
     en_fd = pwm_open_attr(LED_PWM_CHIP, LED_PWM_CHANNEL, "enable");
     if (en_fd >= 0) {
         write(en_fd, "1", 1);
@@ -294,11 +232,6 @@ int led_set(int fd, int brightness)
     return 0;
 }
 
-/*
- * led_get - read current brightness
- *
- * Reads from duty_cycle file, converts back to 0~255.
- */
 int led_get(int fd, int *brightness)
 {
     char buf[32];
@@ -332,25 +265,9 @@ void led_close(int fd)
 }
 
 /*
- * ======================== Motor (28BYJ-48 + ULN2003) ========================
- *
- * Uses character device /dev/motor_dev to control the 28BYJ-48 stepper motor.
- *
- * Drive method:
- *   motor_open()            -> open /dev/motor_dev
- *   motor_step(fd, steps)   -> write(int) of step count, driver auto hrtimer steps
- *   motor_rotate(fd, ms)    -> convert duration to steps, call motor_step
- *   motor_stop(fd)          -> ioctl(MOTOR_IOC_STOP)
- *   motor_set_direction()   -> ioctl(MOTOR_IOC_SET_DIR)
- *   motor_set_speed()       -> ioctl(MOTOR_IOC_SET_SPEED)
- *   motor_set_mode()        -> ioctl(MOTOR_IOC_SET_MODE)
- *   motor_get_status()      -> read() status
- *   motor_close()           -> close fd
- *
- * 28BYJ-48 parameters:
- *   - 4096 steps/rev (half-step), default 1200us/step ~ 15 RPM
- *   - 1 rev ~ 4096 * 1.2ms ~ 4.9 seconds
- *   - 1 second ~ 833 steps ~ 1/5 rev ~ 72 degrees
+ * 28BYJ-48 + ULN2003 via character device /dev/motor_dev.
+ * 4096 steps/rev (half-step), default 1200us/step ~ 15 RPM;
+ * driver auto powers off after the stepping completes.
  */
 
 int motor_open(void)
@@ -361,18 +278,7 @@ int motor_open(void)
     return fd;
 }
 
-/*
- * motor_step - rotate by specified step count (non-blocking)
- *
- * steps > 0: forward
- * steps < 0: reverse (absolute value used)
- * steps = 0: stop immediately
- *
- * 28BYJ-48 common step counts:
- *   4096 = 1 rev (half-step mode)
- *   1024 = 90 degrees
- *   512  = 45 degrees
- */
+/* steps > 0 forward, < 0 reverse, = 0 stop immediately (non-blocking) */
 int motor_step(int fd, int steps)
 {
     if (fd < 0) return -1;
@@ -383,17 +289,7 @@ int motor_step(int fd, int steps)
     return 0;
 }
 
-/*
- * motor_rotate - rotate for specified milliseconds (legacy API)
- *
- * Convert duration to steps:
- *   steps = duration_ms * 1000 / interval_us
- *   default interval_us = 1200 -> steps ~ duration_ms * 0.833
- *
- * For example:
- *   1000ms -> ~833 steps ~ 1/5 rev ~ 73 degrees
- *   5000ms -> ~4167 steps ~ 1 rev
- */
+/* Legacy API: steps = duration_ms * 1000 / interval_us (default 1200us -> ~0.833 steps/ms) */
 int motor_rotate(int fd, int duration_ms)
 {
     int steps;
@@ -410,42 +306,27 @@ int motor_rotate(int fd, int duration_ms)
     return motor_step(fd, steps);
 }
 
-/*
- * motor_stop - stop the motor immediately
- */
 int motor_stop(int fd)
 {
     if (fd < 0) return -1;
     return ioctl(fd, MOTOR_IOC_STOP);
 }
 
-/*
- * motor_set_direction - set rotation direction
- * dir: MOTOR_DIR_CW(0)=forward, MOTOR_DIR_CCW(1)=reverse
- */
+/* dir: MOTOR_DIR_CW(0)=forward, MOTOR_DIR_CCW(1)=reverse */
 int motor_set_direction(int fd, int dir)
 {
     if (fd < 0) return -1;
     return ioctl(fd, MOTOR_IOC_SET_DIR, dir);
 }
 
-/*
- * motor_set_speed - set step interval
- * interval_us: microseconds/step, range 500~10000
- *   1200 = ~15 RPM (default)
- *   800  = ~23 RPM (fast)
- *   2000 = ~9 RPM (slow, high torque)
- */
+/* interval_us: microseconds/step, range 500~10000 (default 1200 = ~15 RPM) */
 int motor_set_speed(int fd, int interval_us)
 {
     if (fd < 0) return -1;
     return ioctl(fd, MOTOR_IOC_SET_SPEED, interval_us);
 }
 
-/*
- * motor_set_mode - set drive mode
- * mode: MOTOR_MODE_HALF(0)=half-step 8-phase, MOTOR_MODE_FULL(1)=full-step 4-phase
- */
+/* mode: MOTOR_MODE_HALF(0), MOTOR_MODE_FULL(1) */
 int motor_set_mode(int fd, int mode)
 {
     if (fd < 0) return -1;
@@ -482,12 +363,7 @@ void motor_close(int fd)
     }
 }
 
-/*
- * ======================== Stepper PWM (A4988/DRV8825) ========================
- *
- * Uses character device /dev/stepper_pwm to control PWM stepper motor driver chips.
- * Unlike motor_drv.c, this controls step speed via PWM pulse frequency.
- */
+/* A4988/DRV8825 via /dev/stepper_pwm; step speed via PWM pulse frequency (unlike GPIO phase switching in motor_drv.c) */
 
 int stepper_pwm_open(void)
 {
@@ -544,8 +420,6 @@ void stepper_pwm_close(int fd)
         close(fd);
     }
 }
-
-/* ======================== DMA SPI ======================== */
 
 int dma_spi_open(void)
 {

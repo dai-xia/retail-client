@@ -131,7 +131,6 @@ void MemberRegister::on_btn_capture_face_clicked()
     m_currentFace = m_faceManager->captureFace();
     HardwareService::getInstance()->setFaceLight(false);
 
-    /* Capture done: resume monitor streaming (if it was running) */
     if (wasMonitoring) {
         m_faceManager->resumeMonitor();
     }
@@ -201,7 +200,7 @@ void MemberRegister::processRegisterRequest()
 
         QImage faceRgb = m_currentFace.convertToFormat(QImage::Format_RGB888);
 
-        // Extract feature vector; uploaded to server for cross-client face matching
+        // Uploaded to server for cross-client face matching
         faceFeature = m_faceManager->extractFaceFeature(faceRgb);
         if(faceFeature.isEmpty())
         {

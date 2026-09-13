@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <time.h>
 #include <pthread.h>
 #include <sys/time.h>
@@ -38,8 +39,11 @@ typedef struct {
 typedef struct {
     log_entry_t *ring;
     int *ready;
-    int head;
-    int tail;
+    /* Monotonic 64-bit counters (never wrap): slot = counter & mask. CAS on a
+     * monotonic counter can't succeed on a stale value (no ABA), unlike wrapped
+     * indices that reappear after a full lap. */
+    uint64_t head;
+    uint64_t tail;
     int size;
     int mask;
     pthread_mutex_t pop_mtx;

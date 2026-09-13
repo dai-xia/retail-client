@@ -80,7 +80,6 @@ FacePayWidget::~FacePayWidget()
         m_faceManager->resumeMonitor();
         qDebug() << "FacePay: monitor stream resumed";
     } else {
-        // Not monitoring: release the camera
         m_faceManager->releaseCamera();
     }
     delete ui;
@@ -104,7 +103,6 @@ void FacePayWidget::slotUpdateCameraFrame()
         ui->label_status->setStyleSheet("color: blue; font-size: 14px;");
     }
 
-    // Draw detection boxes and show in the camera area
     QImage display = frame.convertToFormat(QImage::Format_RGB32);
     if(faceDetected)
     {
@@ -129,7 +127,6 @@ void FacePayWidget::processFaceVerification(const QImage& frame)
 
     qDebug() << "Face verification flow started...";
 
-    // Extract 128-dim face feature and convert to string
     QString faceFeature = m_faceManager->extractFaceFeature(frame);
 
     if(faceFeature.isEmpty())

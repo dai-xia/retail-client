@@ -29,7 +29,6 @@ bool VoiceEngine::init(const QString &modelPath)
     m_assist = new VoiceAssist(this);
     QString path = modelPath;
     if (path.isEmpty()) {
-        // Search the Vosk model directory by priority.
         QStringList searchPaths = {
             "./voice_model/vosk-model-small-cn-0.22",
             "../voice_model/vosk-model-small-cn-0.22",
@@ -80,8 +79,6 @@ void VoiceEngine::stopVoiceListening()
     }
 }
 
-// Intent rule table. Each entry: {patterns, target, description}.
-// patterns are Chinese keywords matched against the recognized text.
 void VoiceEngine::buildIntentTable()
 {
     m_intentTable = {
@@ -120,8 +117,6 @@ void VoiceEngine::buildIntentTable()
     };
 }
 
-// Goods alias table. Each entry: {aliases, standard name, description}.
-// Aliases are matched against the recognized text to resolve a product.
 void VoiceEngine::buildGoodsAliases()
 {
     m_goodsAliases = {
@@ -135,9 +130,6 @@ void VoiceEngine::buildGoodsAliases()
         {{"啤酒", "beer", "青岛"},                "青岛啤酒",     ""},
     };
 }
-
-// Number mapping: {number words, numeric string, tag}.
-
 
 void VoiceEngine::buildNumberMap()
 {

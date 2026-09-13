@@ -1,8 +1,6 @@
 /**
- * @file rga_x86_stub.cpp - librga im2d API stub (x86 desktop dev only)
- *
- * wrapbuffer_* are inline/macros in the RGA header, no stub needed.
- * Only improcess (declared in im2d_single.h) is stubbed.
+ * @file rga_x86_stub.cpp
+ * @brief librga im2d API stub for x86 desktop dev (improcess only; wrapbuffer_* are inline).
  */
 #include <cstddef>
 #include <cstring>

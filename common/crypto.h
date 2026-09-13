@@ -10,20 +10,10 @@ extern "C" {
 #define CRYPTO_TAG_LEN        16    /* GCM authentication tag */
 #define CRYPTO_SALT_LEN       16
 
-/*
- * GCM ciphertext layout:
- *   IV(12 bytes) + ciphertext (same length as plaintext, no padding) + TAG(16 bytes)
- *
- * Total overhead = 12 + 16 = 28 bytes (close to legacy CBC overhead of 16+padding)
- */
-
+/* GCM layout: IV(12) + ciphertext + TAG(16); total overhead 28 bytes */
 #define CRYPTO_GCM_OVERHEAD   (CRYPTO_IV_LEN + CRYPTO_TAG_LEN)
 
-/*
- * Debug / production mode switch
- * Debug (default): use built-in hardcoded key
- * Production: read key from /etc/retail/crypto.key (per-device key)
- */
+/* Debug (default): built-in key. Production: per-device key file. */
 /* #define CRYPTO_PRODUCTION */
 
 #ifdef CRYPTO_PRODUCTION

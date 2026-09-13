@@ -9,31 +9,22 @@
 
 class VoiceAssist;
 
-/**
- * @brief Unified rule entry: keyword patterns -> target category / standard name
- *
- * All "text -> result" mappings are expressed with this struct; the storage container is uniformly QVector<PatternRule>.
- * It replaces the previously mixed QMap, QStringList, and regex forms.
- */
+/** @brief keyword patterns -> target category / standard name */
 struct PatternRule {
     QStringList patterns;       // Trigger keyword list (any match counts as a hit)
     QString     target;         // Target value: intent category / standard product name / numeric mapping target
     QString     description;    // Feature description (only used for help prompts)
 };
 
-/**
- * @brief Voice parsing result struct
- */
+/** @brief Voice parsing result struct */
 struct VoiceResult {
-    QString     category;   // Matched command category
-    QString     rawText;    // Raw voice recognition text
-    QStringList args;       // Parsed command arguments
-    bool        matched;    // Whether a valid command was successfully matched
+    QString     category;
+    QString     rawText;
+    QStringList args;
+    bool        matched;
 };
 
-/**
- * @brief Voice engine core class
- */
+/** @brief Voice engine core class */
 class VoiceEngine : public QObject
 {
     Q_OBJECT
@@ -74,9 +65,9 @@ signals:
 
 private:
     bool m_initialized;
-    QVector<PatternRule> m_intentTable;    // Intent rule table
-    QVector<PatternRule> m_goodsAliases;   // Goods alias table (patterns=aliases, target=standard name)
-    QVector<PatternRule> m_numberMap;      // Number mapping table (patterns=number/unit text, target=numeric string)
+    QVector<PatternRule> m_intentTable;
+    QVector<PatternRule> m_goodsAliases;   // patterns=aliases, target=standard name
+    QVector<PatternRule> m_numberMap;      // patterns=number/unit text, target=numeric string
     VoiceAssist *m_assist;
 
     void buildIntentTable();

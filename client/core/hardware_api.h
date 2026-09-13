@@ -7,13 +7,12 @@
 extern "C" {
 #endif
 
-/* ======================== BH1750 API ======================== */
 int bh1750_open(void);
 int bh1750_read_light(int fd);
 void bh1750_close(int fd);
 
-/* BH1750 advanced ioctl interface / ioctl command codes (control words) */
-#define BH1750_IOC_MAGIC        'B'               //Magic number: uses character 'B' as the unique identifier for this device's ioctl commands, preventing conflicts with other devices.
+/* BH1750 ioctl interface */
+#define BH1750_IOC_MAGIC        'B'               //ioctl magic
 #define BH1750_IOC_SET_MODE     _IOW(BH1750_IOC_MAGIC, 1, uint8_t)
 #define BH1750_IOC_SET_MTREG    _IOW(BH1750_IOC_MAGIC, 2, uint8_t)
 #define BH1750_IOC_GET_LUX      _IOR(BH1750_IOC_MAGIC, 3, int)
@@ -22,12 +21,11 @@ int bh1750_ioctl_set_mode(int fd, uint8_t mode);
 int bh1750_ioctl_set_mtreg(int fd, uint8_t mtreg);
 int bh1750_ioctl_get_lux(int fd, int *lux);
 
-/* ======================== RC522 API ======================== */
 int rc522_open(void);
 int rc522_get_uid(int fd, uint8_t *uid_buf);
 void rc522_close(int fd);
 
-/* RC522 advanced ioctl interface */
+/* RC522 ioctl interface */
 #define RC522_IOC_MAGIC         'R'
 #define RC522_IOC_GET_UID       _IOR(RC522_IOC_MAGIC, 1, uint8_t[4])
 #define RC522_IOC_SET_ANTENNA   _IOW(RC522_IOC_MAGIC, 2, int)
@@ -65,12 +63,7 @@ int rc522_ioctl_get_version(int fd, uint8_t *ver);
 int rc522_ioctl_read_block(int fd, uint8_t block, uint8_t *data);
 int rc522_ioctl_write_block(int fd, uint8_t block, const uint8_t *data);
 
-/* ======================== LED API (PWM sysfs) ======================== */
-
-/*
- * PWM pin configuration (RK3568)
- *   Adjustable by modifying LED_PWM_CHIP / LED_PWM_CHANNEL in hardware_api.c
- */
+/* PWM pin configurable via LED_PWM_CHIP / LED_PWM_CHANNEL in hardware_api.c */
 #define LED_PWM_BRIGHTNESS_MAX 255
 
 int led_open(void);
@@ -78,32 +71,20 @@ int led_set(int fd, int brightness);          /* 0~255 -> 0%~100% duty cycle */
 int led_get(int fd, int *brightness);
 void led_close(int fd);
 
-/* ======================== Motor API (28BYJ-48 + ULN2003) ======================== */
-
 /*
- * 28BYJ-48 stepper motor + ULN2003 driver board
- *
- * Motor parameters:
- *   - Step angle: 5.625 deg/64 (after reduction)
- *   - Steps per revolution: 4096 (half-step), 2048 (full-step)
- *   - Recommended speed: ~15 RPM
- *
- * Drive method: character device /dev/motor_dev
- *   - write(int steps)   -> step control (non-blocking)
- *   - ioctl              -> direction/speed/mode
- *
- * ioctl commands (correspond to kernel driver motor_drv.c):
+ * 28BYJ-48 + ULN2003 via /dev/motor_dev: write(int steps) (non-blocking), ioctl for dir/speed/mode.
+ * 4096 steps/rev (half-step), 2048 (full-step), recommended ~15 RPM.
  */
-#define MOTOR_IOC_MAGIC     'M'                              /* Motor device ioctl magic identifier */
-#define MOTOR_IOC_SET_DIR   _IOW(MOTOR_IOC_MAGIC, 1, int)    /* Set direction: 0=clockwise (CW), 1=counterclockwise (CCW) */
-#define MOTOR_IOC_SET_SPEED _IOW(MOTOR_IOC_MAGIC, 2, int)    /* Set speed: unit microseconds (us), pulse interval */
-#define MOTOR_IOC_SET_MODE  _IOW(MOTOR_IOC_MAGIC, 3, int)    /* Set drive mode: 0=half-step, 1=full-step */
-#define MOTOR_IOC_GET_DIR   _IOR(MOTOR_IOC_MAGIC, 4, int)    /* Read current motor direction */
-#define MOTOR_IOC_GET_SPEED _IOR(MOTOR_IOC_MAGIC, 5, int)    /* Read current pulse interval (speed) */
-#define MOTOR_IOC_GET_MODE  _IOR(MOTOR_IOC_MAGIC, 6, int)    /* Read current drive mode */
-#define MOTOR_IOC_STOP      _IO(MOTOR_IOC_MAGIC, 7)          /* Send stop command, motor stops immediately */
-#define MOTOR_IOC_GET_POS   _IOR(MOTOR_IOC_MAGIC, 8, int)    /* Read accumulated steps */
-#define MOTOR_IOC_RESET_POS _IO(MOTOR_IOC_MAGIC, 9)          /* Reset accumulated steps to zero */
+#define MOTOR_IOC_MAGIC     'M'                              /* ioctl magic */
+#define MOTOR_IOC_SET_DIR   _IOW(MOTOR_IOC_MAGIC, 1, int)    /* 0=CW, 1=CCW */
+#define MOTOR_IOC_SET_SPEED _IOW(MOTOR_IOC_MAGIC, 2, int)    /* step interval in us */
+#define MOTOR_IOC_SET_MODE  _IOW(MOTOR_IOC_MAGIC, 3, int)    /* 0=half-step, 1=full-step */
+#define MOTOR_IOC_GET_DIR   _IOR(MOTOR_IOC_MAGIC, 4, int)    /* current direction */
+#define MOTOR_IOC_GET_SPEED _IOR(MOTOR_IOC_MAGIC, 5, int)    /* current step interval (us) */
+#define MOTOR_IOC_GET_MODE  _IOR(MOTOR_IOC_MAGIC, 6, int)    /* current drive mode */
+#define MOTOR_IOC_STOP      _IO(MOTOR_IOC_MAGIC, 7)          /* stop immediately */
+#define MOTOR_IOC_GET_POS   _IOR(MOTOR_IOC_MAGIC, 8, int)    /* accumulated steps */
+#define MOTOR_IOC_RESET_POS _IO(MOTOR_IOC_MAGIC, 9)          /* reset accumulated steps to zero */
 /* Direction constants */
 #define MOTOR_DIR_CW    0   /* Forward */
 #define MOTOR_DIR_CCW   1   /* Reverse */
@@ -128,33 +109,23 @@ int  motor_set_direction(int fd, int dir);     /* Set direction */
 int  motor_set_speed(int fd, int interval_us); /* Set step interval */
 int  motor_set_mode(int fd, int mode);         /* Set drive mode */
 int  motor_get_status(int fd, int *status);    /* 0=idle, 1=running */
-int  motor_get_position(int fd, int *pos);     /* Get accumulated steps */
-int  motor_reset_position(int fd);             /* Reset accumulated steps to zero */
+int  motor_get_position(int fd, int *pos);     /* accumulated steps */
+int  motor_reset_position(int fd);             /* reset accumulated steps to zero */
 void motor_close(int fd);
 
-/* ======================== Stepper PWM API (A4988/DRV8825) ======================== */
-
 /*
- * PWM stepper motor driver (motor_drv_pwm.c)
- *
- * Drive method: character device /dev/stepper_pwm
- *   - write(int steps)  -> step control (non-blocking)
- *   - ioctl             -> speed/direction/position
- *
- * Differences from motor_drv.c:
- *   - motor_drv.c: 28BYJ-48 + ULN2003 (4 GPIO phase switching)
- *   - motor_drv_pwm.c: A4988/DRV8825 (PWM pulse + DIR GPIO)
+ * PWM stepper driver (motor_drv_pwm.c) via /dev/stepper_pwm:
+ * write(int steps) (non-blocking), ioctl for speed/direction/position.
+ * Unlike motor_dev: A4988/DRV8825 (PWM pulse + DIR GPIO) instead of GPIO phase switching.
  */
-
-/* Stepper PWM ioctl commands */
 #define STEPPER_IOC_MAGIC      'S'
-#define STEPPER_IOC_SET_SPEED  _IOW(STEPPER_IOC_MAGIC, 1, int)   /* Set step frequency (Hz) */
-#define STEPPER_IOC_GET_SPEED  _IOR(STEPPER_IOC_MAGIC, 2, int)   /* Read step frequency */
-#define STEPPER_IOC_SET_DIR    _IOW(STEPPER_IOC_MAGIC, 3, int)   /* Set direction */
-#define STEPPER_IOC_GET_DIR    _IOR(STEPPER_IOC_MAGIC, 4, int)   /* Read direction */
-#define STEPPER_IOC_STOP       _IO(STEPPER_IOC_MAGIC, 5)         /* Stop immediately */
-#define STEPPER_IOC_GET_POS    _IOR(STEPPER_IOC_MAGIC, 6, int)   /* Read accumulated steps */
-#define STEPPER_IOC_RESET_POS  _IO(STEPPER_IOC_MAGIC, 7)         /* Reset accumulated steps to zero */
+#define STEPPER_IOC_SET_SPEED  _IOW(STEPPER_IOC_MAGIC, 1, int)   /* step frequency (Hz) */
+#define STEPPER_IOC_GET_SPEED  _IOR(STEPPER_IOC_MAGIC, 2, int)   /* current step frequency (Hz) */
+#define STEPPER_IOC_SET_DIR    _IOW(STEPPER_IOC_MAGIC, 3, int)   /* 0=CW, 1=CCW */
+#define STEPPER_IOC_GET_DIR    _IOR(STEPPER_IOC_MAGIC, 4, int)   /* current direction */
+#define STEPPER_IOC_STOP       _IO(STEPPER_IOC_MAGIC, 5)         /* stop immediately */
+#define STEPPER_IOC_GET_POS    _IOR(STEPPER_IOC_MAGIC, 6, int)   /* accumulated steps */
+#define STEPPER_IOC_RESET_POS  _IO(STEPPER_IOC_MAGIC, 7)         /* reset accumulated steps to zero */
 
 int  stepper_pwm_open(void);
 int  stepper_pwm_step(int fd, int steps);
@@ -165,20 +136,7 @@ int  stepper_pwm_get_status(int fd, int *status);
 int  stepper_pwm_get_position(int fd, int *pos);
 void stepper_pwm_close(int fd);
 
-/* ======================== DMA SPI API ======================== */
-
-/*
- * DMA SPI driver (dma_spi_drv.c)
- *
- * Uses DMA for large-block SPI transfers, suitable for LCD frame buffers, firmware upgrades, etc.
- *
- * Drive method: character device /dev/dma_spi
- *   - read(buf, len)   -> DMA reads data from SPI peripheral
- *   - write(buf, len)  -> DMA sends data to SPI peripheral
- *   - ioctl            -> get stats / set speed
- */
-
-/* DMA SPI ioctl commands */
+/* DMA SPI driver (dma_spi_drv.c): large-block SPI transfers via /dev/dma_spi */
 #define DMA_SPI_IOC_MAGIC       'D'
 #define DMA_SPI_IOC_GET_STATS   _IOR(DMA_SPI_IOC_MAGIC, 1, struct dma_spi_stats)
 #define DMA_SPI_IOC_RESET_STATS _IO(DMA_SPI_IOC_MAGIC, 2)

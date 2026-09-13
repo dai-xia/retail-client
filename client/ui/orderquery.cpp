@@ -71,7 +71,6 @@ void OrderQuery::slotTableItemClicked(int row, int column)
     Q_UNUSED(column);
     if(row < 0 || row >= m_orderList.size()) return;
 
-    // Parse the goods list embedded in the order
     ui->tableWidget_detail->setRowCount(0);
     QString goodsListStr = m_orderList[row].goods_list;
     if(goodsListStr.isEmpty()) return;

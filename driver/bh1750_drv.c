@@ -1,105 +1,5 @@
 /*
- * BH1750 Light Sensor IIO Driver — Refactored Edition
- *
- * Platform: RK3568
- * Bus: I2C (address 0x23, ADDR pin tied to GND)
- * Framework: Industrial I/O (IIO) subsystem
- *
- * IIO userspace interface:
- *   /sys/bus/iio/devices/iio:device0/
- *     in_illuminance_raw          — raw light value (lux)
- *     in_illuminance_scale        — scale factor (fixed 1.0)
- *     in_illuminance_integration_time — integration time (ms)
- *     name                        — device name
- *
- * Also retains the /dev/bh1750 character device interface (for backward compatibility)
- *
- * Hardware wiring (BH1750 → RK3568):
- *   SDA  → I2C3_SDA
- *   SCL  → I2C3_SCL
- *   ADDR → GND    (I2C address = 0x23)
- *   VCC  → 3.3V
- *   GND  → GND
- *
- * Device tree:
- *   &i2c3 {
- *       bh1750@23 {
- *           compatible = "rohm,bh1750";
- *           reg = <0x23>;
- *           default-mtreg = <69>;
- *       };
- *   };
- *
- * ==================== Interview Knowledge Points ====================
- *
- * 1. Industrial I/O (IIO) subsystem
- *
- *    IIO is the unified framework in Linux for sensors (ADC/DAC/light/
- *    accelerometer/temperature, etc.), located under /sys/bus/iio/.
- *
- *    Core data structures:
- *      struct iio_dev       — IIO device (represents one physical sensor)
- *      struct iio_chan_spec — channel description (each measurement of a sensor)
- *      struct iio_info      — driver operations (read_raw, write_raw, etc.)
- *
- *    Channel types:
- *      IIO_LIGHT    — light sensor
- *      IIO_TEMP     — temperature sensor
- *      IIO_ACCEL    — accelerometer
- *      IIO_VOLTAGE  — voltage measurement
- *      IIO_CURRENT  — current measurement
- *      IIO_HUMIDITYRELATIVE — humidity sensor
- *      IIO_PROXIMITY — proximity sensor
- *      IIO_PRESSURE  — pressure sensor
- *
- * 2. iio_chan_spec — channel definition
- *
- *    Each channel describes one measurement of a sensor:
- *      .type       = IIO_LIGHT       // channel type
- *      .info_mask_separate = BIT(IIO_CHAN_INFO_RAW)  // supports raw value
- *      .info_mask_shared_by_all = ... // attributes shared by all channels
- *
- *    Common info_mask bits:
- *      BIT(IIO_CHAN_INFO_RAW)        — raw value (e.g. ADC count)
- *      BIT(IIO_CHAN_INFO_SCALE)      — scale factor (raw * scale = physical value)
- *      BIT(IIO_CHAN_INFO_OFFSET)     — offset
- *      BIT(IIO_CHAN_INFO_INT_TIME)   — integration time
- *      BIT(IIO_CHAN_INFO_SAMP_FREQ)  — sampling frequency
- *      BIT(IIO_CHAN_INFO_PROCESSED)  — processed value (e.g. lux, not raw)
- *
- *    For BH1750:
- *      Because BH1750 directly outputs lux (not a raw ADC value),
- *      IIO_CHAN_INFO_PROCESSED is used instead of _RAW.
- *
- * 3. iio_info.read_raw — read channel value
- *
- *    static int bh1750_read_raw(struct iio_dev *indio_dev,
- *                               struct iio_chan_spec const *chan,
- *                               int *val, int *val2, long mask)
- *
- *    Parameters:
- *      chan — which channel
- *      mask — which attribute to read (RAW, SCALE, INT_TIME, etc.)
- *      val, val2 — output values (val is integer part, val2 is fractional part)
- *
- *    Return value:
- *      IIO_VAL_INT    — val is an integer
- *      IIO_VAL_INT_PLUS_MICRO — val is integer, val2 is microseconds
- *      IIO_VAL_INT_PLUS_NANO  — val is integer, val2 is nanoseconds
- *      negative = error
- *
- * 4. Comparison with character device driver
- *
- *    Character device driver (legacy bh1750_drv.c):
- *      - Custom /dev/bh1750 interface
- *      - read/ioctl are non-standard
- *      - Each driver designs its own interface
- *
- *    IIO driver (new version):
- *      - Standard sysfs interface (/sys/bus/iio/)
- *      - Unified interface for all IIO devices
- *      - Userspace libiio library can access directly
- *      - Mutually exclusive with hwmon/input subsystems
+ * BH1750 Light Sensor IIO Driver — I2C (addr 0x23)
  */
 
 #define pr_fmt(fmt) "bh1750_iio: " fmt
@@ -138,7 +38,6 @@
 #define BH1750_H_RES_MS      180  /* High resolution needs 120-180ms */
 #define BH1750_L_RES_MS      24   /* Low resolution needs 16-24ms */
 
-/* ======================== ioctl commands (backward compatible) ======================== */
 #define BH1750_IOC_MAGIC        'B'
 #define BH1750_IOC_SET_MODE     _IOW(BH1750_IOC_MAGIC, 1, u8)
 #define BH1750_IOC_SET_MTREG    _IOW(BH1750_IOC_MAGIC, 2, u8)
@@ -160,8 +59,6 @@ struct bh1750_data {
     struct class   *class;
     struct device  *cls_dev;
 };
-
-/* ======================== I2C communication ======================== */
 
 static int bh1750_write_cmd(struct bh1750_data *data, u8 cmd)
 {
@@ -186,18 +83,7 @@ static void bh1750_set_mtreg(struct bh1750_data *data, u8 mtreg)
     data->mtreg = mtreg;
 }
 
-/*
- * Read light value (lux)
- *
- * BH1750 data format:
- *   Read 2 bytes, raw value = (data[0] << 8) | data[1]
- *   lux = raw / 1.2 * (MTreg / 69)
- *
- *   With default MTreg=69: lux = raw / 1.2
- *
- * Note: In one-shot mode, measurement completes and enters Power Down;
- *       a new measurement command must be issued again.
- */
+/* Read lux: raw = (buf[0]<<8)|buf[1]; lux = raw/1.2*(MTreg/69); one-shot re-triggers */
 static int bh1750_read_raw_lux(struct bh1750_data *data, int *lux)
 {
     u8 buf[2];
@@ -217,34 +103,10 @@ static int bh1750_read_raw_lux(struct bh1750_data *data, int *lux)
     if (ret != 2)
         return -EIO;
 
-    /*
-     * Raw value → lux conversion:
-     *   raw = buf[0]<<8 | buf[1]
-     *   lux = raw / 1.2 * (MTreg / 69)
-     *
-     * For simplicity, this directly returns raw / 1.2 (default MTreg=69).
-     * More precise formula: lux = raw * 10 / 12 * MTreg / 69
-     */
     *lux = ((buf[0] << 8) | buf[1]) * 10 / 12 * data->mtreg / 69;
     return 0;
 }
 
-/* ======================== IIO interface ======================== */
-
-/*
- * IIO channel definition
- *
- * BH1750 has only one light channel, directly outputs lux (processed value),
- * so no scale/offset is needed.
- *
- * info_mask_separate:
- *   BIT(IIO_CHAN_INFO_PROCESSED) — supports reading processed value (lux)
- *   BIT(IIO_CHAN_INFO_INT_TIME)  — supports reading/setting integration time
- *
- * If using raw values (raw ADC values):
- *   BIT(IIO_CHAN_INFO_RAW)   — raw ADC value
- *   BIT(IIO_CHAN_INFO_SCALE) — scale factor (lux = raw * scale)
- */
 static const struct iio_chan_spec bh1750_channels[] = {
     {
         .type = IIO_LIGHT,
@@ -253,17 +115,7 @@ static const struct iio_chan_spec bh1750_channels[] = {
     },
 };
 
-/*
- * read_raw — IIO core read callback
- *
- * mask decides which attribute to read:
- *   IIO_CHAN_INFO_PROCESSED → read light value (lux)
- *   IIO_CHAN_INFO_INT_TIME  → read integration time
- *
- * Return value type:
- *   IIO_VAL_INT  — val is integer (used for lux)
- *   IIO_VAL_INT_PLUS_MICRO — val is integer, val2 is microseconds (used for integration time)
- */
+/* read_raw — IIO core read callback */
 static int bh1750_read_raw(struct iio_dev *indio_dev,
                            struct iio_chan_spec const *chan,
                            int *val, int *val2, long mask)
@@ -273,12 +125,6 @@ static int bh1750_read_raw(struct iio_dev *indio_dev,
 
     switch (mask) {
     case IIO_CHAN_INFO_PROCESSED:
-        /*
-         * Read light value (lux)
-         *
-         * BH1750 directly outputs lux, no scale conversion needed,
-         * so PROCESSED is used instead of RAW.
-         */
         mutex_lock(&data->lock);
         ret = bh1750_read_raw_lux(data, val);
         mutex_unlock(&data->lock);
@@ -286,15 +132,7 @@ static int bh1750_read_raw(struct iio_dev *indio_dev,
         return IIO_VAL_INT;
 
     case IIO_CHAN_INFO_INT_TIME:
-        /*
-         * Integration time (microseconds)
-         *
-         * BH1750's integration time is determined by MTreg:
-         *   Default MTreg=69 → integration time ≈ 120ms (high resolution)
-         *   Actual integration time = MTreg * 1.85ms
-         *
-         * This value is returned as a reference.
-         */
+        /* integration time = MTreg * 1.85ms, in μs */
         *val = 0;
         *val2 = data->mtreg * 1850;  /* μs */
         return IIO_VAL_INT_PLUS_MICRO;
@@ -304,18 +142,7 @@ static int bh1750_read_raw(struct iio_dev *indio_dev,
     }
 }
 
-/*
- * write_raw — write integration time
- *
- * Adjusts integration time by modifying MTreg.
- * MTreg range: 31 ~ 254
- * Default value: 69
- *
- * Integration time = MTreg * 1.85ms (approximate)
- *   MTreg=31  → ~57ms
- *   MTreg=69  → ~128ms (default)
- *   MTreg=254 → ~470ms
- */
+/* write_raw — adjust integration time via MTreg (31~254) */
 static int bh1750_write_raw(struct iio_dev *indio_dev,
                             struct iio_chan_spec const *chan,
                             int val, int val2, long mask)
@@ -326,14 +153,12 @@ static int bh1750_write_raw(struct iio_dev *indio_dev,
     if (mask != IIO_CHAN_INFO_INT_TIME)
         return -EINVAL;
 
-    /* Convert μs back to MTreg */
     mtreg = (u8)((val * 1000000 + val2) / 1850);
     if (mtreg < 31 || mtreg > 254)
         return -EINVAL;
 
     mutex_lock(&data->lock);
     bh1750_set_mtreg(data, mtreg);
-    /* Re-apply current mode */
     bh1750_write_cmd(data, data->current_mode);
     if ((data->current_mode & 0xF0) == 0x10)  /* Continuous mode */
         msleep(BH1750_H_RES_MS);
@@ -346,8 +171,6 @@ static const struct iio_info bh1750_info = {
     .read_raw  = bh1750_read_raw,
     .write_raw = bh1750_write_raw,
 };
-
-/* ======================== Character device (backward compatible) ======================== */
 
 static struct bh1750_data *bh1750_from_file(struct file *filp)
 {
@@ -461,19 +284,6 @@ static struct file_operations bh1750_fops = {
     .unlocked_ioctl = bh1750_chr_ioctl,
 };
 
-/* ======================== i2c_driver ======================== */
-
-/*
- * bh1750_probe — initialization after I2C device matched
- *
- * Similar to platform_driver's probe, but with different data structures:
- *   - platform_driver.probe → struct platform_device *pdev
- *   - i2c_driver.probe       → struct i2c_client *client
- *   - spi_driver.probe       → struct spi_device *spi
- *
- * Common points: both allocate device private data via devm_kzalloc,
- *                and match the device tree via of_device_id.
- */
 static int bh1750_probe(struct i2c_client *client,
                         const struct i2c_device_id *id)
 {
@@ -483,7 +293,6 @@ static int bh1750_probe(struct i2c_client *client,
     int ret;
     u32 default_mtreg = BH1750_DEFAULT_MTREG;
 
-    /* 1. Allocate IIO device (including private data) */
     indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
     if (!indio_dev)
         return -ENOMEM;
@@ -495,32 +304,27 @@ static int bh1750_probe(struct i2c_client *client,
     data->mtreg = BH1750_DEFAULT_MTREG;
     mutex_init(&data->lock);
 
-    /* Parse device tree */
     of_property_read_u32(dev->of_node, "default-mtreg", &default_mtreg);
     data->mtreg = (u8)default_mtreg;
 
     i2c_set_clientdata(client, data);
 
-    /* 2. Configure IIO device */
     indio_dev->name = "bh1750";
     indio_dev->info = &bh1750_info;
     indio_dev->channels = bh1750_channels;
     indio_dev->num_channels = ARRAY_SIZE(bh1750_channels);
     indio_dev->modes = INDIO_DIRECT_MODE;
 
-    /* 3. Register IIO device */
     ret = devm_iio_device_register(dev, indio_dev);
     if (ret) {
         dev_err(dev, "Failed to register IIO device: %d\n", ret);
         return ret;
     }
 
-    /* 4. Initialize sensor */
     bh1750_write_cmd(data, BH1750_POWER_ON);
     bh1750_set_mtreg(data, data->mtreg);
     bh1750_write_cmd(data, BH1750_MODE_H_RES);
 
-    /* 5. Register character device (backward compatible with legacy interface) */
     ret = alloc_chrdev_region(&data->devid, 0, 1, BH1750_DEV_NAME);
     if (ret) return ret;
 
@@ -572,13 +376,6 @@ static int bh1750_remove(struct i2c_client *client)
     return 0;
 }
 
-/*
- * Device tree match table
- *
- * ★ Uses standard compatible string "rohm,bh1750"
- *    This is the standard binding name in the Linux mainline kernel.
- *    If the device tree also uses this compatible, the driver matches automatically.
- */
 static const struct of_device_id bh1750_of_match[] = {
     { .compatible = "rohm,bh1750" },
     { .compatible = "bh1750,light" },  /* keep legacy compatibility */

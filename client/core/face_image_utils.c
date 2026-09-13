@@ -1,9 +1,6 @@
 /**
  * @file face_image_utils.c
- * @brief Face image preprocessing utilities (bilinear scaling + cropping, RGB passthrough)
- *
- * Common code extracted from face_landmark.c and face_antispoof.c.
- * Unified RGB convention, no more BGR<->RGB conversion.
+ * @brief Face image preprocessing (bilinear scaling + cropping, RGB passthrough)
  */
 
 #include "face_image_utils.h"

@@ -52,7 +52,6 @@ void OtaUpdater::slotStartTcpDownload(const QString &version, const QString &fil
     m_tcpTotalChunks = 0;
     m_expectedChunkIndex = 0;
 
-    /* Close any previous temp file (if present) */
     if (m_tcpTempFile) {
         m_tcpTempFile->close();
         delete m_tcpTempFile;
@@ -67,6 +66,7 @@ void OtaUpdater::slotStartTcpDownload(const QString &version, const QString &fil
     m_tcpTempPath = QString("%1/%2_%3")
         .arg(saveDir).arg(version).arg(filename);
 
+    /* Open temp file for streaming each chunk; no longer caches everything in memory */
     /* Open temp file for streaming each chunk; no longer caches everything in memory */
     m_tcpTempFile = new QFile(m_tcpTempPath);
     if (!m_tcpTempFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -106,7 +106,7 @@ void OtaUpdater::slotReceiveChunk(int chunkIndex, int totalChunks, const QByteAr
 
     m_tcpTotalChunks = totalChunks;
 
-    /* Streaming write: append each chunk directly to the temp file, no in-memory cache */
+    /* Stream chunks straight to disk, no in-memory cache */
     if (m_tcpTempFile && m_tcpTempFile->isOpen()) {
         qint64 written = m_tcpTempFile->write(data);
         if (written != data.size()) {
@@ -143,14 +143,12 @@ void OtaUpdater::slotReceiveChunk(int chunkIndex, int totalChunks, const QByteAr
             return;
         }
 
-        /* Close temp file, finalize the write */
         if (m_tcpTempFile) {
             m_tcpTempFile->close();
             delete m_tcpTempFile;
             m_tcpTempFile = nullptr;
         }
 
-        /* Verify the on-disk file size */
         QFileInfo fi(m_tcpTempPath);
         if (fi.size() != m_tcpFileSize) {
             LOGE("OtaUpdater: file size mismatch expected=%d actual=%lld",
@@ -160,7 +158,6 @@ void OtaUpdater::slotReceiveChunk(int chunkIndex, int totalChunks, const QByteAr
             return;
         }
 
-        /* SHA256 verification */
         char shaHex[OTA_SHA256_HEX_LEN];
         if (ota_sha256_file(m_tcpTempPath.toUtf8().constData(), shaHex) != 0) {
             QFile::remove(m_tcpTempPath);
@@ -207,7 +204,6 @@ void OtaUpdater::slotInstallTcpDownload(const QString &newFilePath)
     }
 }
 
-/* ============== App-level OTA install (original logic) ============== */
 void OtaUpdater::installAppOta(const QString &newFilePath)
 {
     emit signalProgressChanged(OTA_STATE_INSTALLING, 100, "安装应用更新...");
@@ -253,12 +249,10 @@ void OtaUpdater::installAppOta(const QString &newFilePath)
     emit signalUpdateFinished(true, "升级成功");
 }
 
-/* ============== System-level OTA install (swupdate + A/B) ============== */
 void OtaUpdater::installSystemOta(const QString &newFilePath)
 {
     emit signalProgressChanged(OTA_STATE_INSTALLING, 30, "写入非活动分区...");
 
-    /* 1. Run swupdate to write the image to the inactive slot */
     if (ota_system_install(m_ota, newFilePath.toUtf8().constData()) != 0) {
         emit signalUpdateFinished(false, "swupdate 写入失败");
         return;
@@ -266,7 +260,6 @@ void OtaUpdater::installSystemOta(const QString &newFilePath)
 
     emit signalProgressChanged(OTA_STATE_INSTALLING, 60, "切换启动槽位...");
 
-    /* 2. Set the upgrade mark + switch the active slot */
     if (ota_system_set_upgrade_env(m_ota) != 0) {
         emit signalUpdateFinished(false, "U-Boot 环境变量设置失败");
         return;
@@ -274,7 +267,7 @@ void OtaUpdater::installSystemOta(const QString &newFilePath)
 
     emit signalProgressChanged(OTA_STATE_INSTALLING, 90, "准备重启...");
 
-    /* 3. Write the version into the boot mark so the post-boot health check can detect it */
+    /* Write version into boot mark for post-boot health check */
     ota_set_boot_mark(m_ota);
 
     strncpy(m_ota->current_version, m_ota->manifest.version,

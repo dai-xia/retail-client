@@ -1,21 +1,5 @@
 /*
  * hw_watchdog.c - Linux hardware watchdog (/dev/watchdog)
- *
- * Responsibility division:
- *   create      open /dev/watchdog; the kernel starts the countdown
- *   start       start the feed-dog thread
- *   stop        full stop: write "V" to notify kernel of normal exit + close(fd) + join thread
- *   destroy     calls stop then frees memory (object-oriented destructor)
- *   emergency_disable  dedicated for signal handlers: write V + close + set flag
- *                     (no thread join, because _exit is imminent; all threads in process are reclaimed by kernel)
- *   thread      only responsible for feeding the dog, not for any cleanup
- *
- * Close protocol:
- *   open("/dev/watchdog")  -> kernel starts the countdown
- *   write(fd, "", 1)       -> feed the dog, reset the countdown
- *   write(fd, "V", 1)      -> tell the kernel "normal exit, do not reboot"
- *   close(fd)              -> release the device
- *   close without V write  -> kernel may consider it abnormal exit -> triggers system reboot
  */
 
 #include "hw_watchdog.h"
@@ -23,8 +7,6 @@
 #include <errno.h>
 
 static hw_watchdog_t *g_hw_watchdog = NULL;
-
-/* ==================== Feed-dog thread ==================== */
 
 static void *hw_watchdog_thread(void *arg)
 {
@@ -39,8 +21,6 @@ static void *hw_watchdog_thread(void *arg)
 
     return NULL;
 }
-
-/* ==================== Lifecycle ==================== */
 
 hw_watchdog_t* hw_watchdog_create(int interval_sec)
 {
@@ -80,10 +60,7 @@ int hw_watchdog_start(hw_watchdog_t *hw)
     return 0;
 }
 
-/*
- * Normal stop: write "V" + close(fd) + join thread
- * All normal exits go through here (MainWindow::~MainWindow -> hw_watchdog_destroy)
- */
+/* Normal stop: write "V" (notify kernel of clean exit) + close + join thread */
 void hw_watchdog_stop(hw_watchdog_t *hw)
 {
     if (!hw || !hw->running) return;
@@ -99,7 +76,6 @@ void hw_watchdog_stop(hw_watchdog_t *hw)
     pthread_join(hw->thread, NULL);
 }
 
-/* Destructor: stop + free memory */
 void hw_watchdog_destroy(hw_watchdog_t *hw)
 {
     if (!hw) return;
